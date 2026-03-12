@@ -1,0 +1,88 @@
+{
+    "solubility": {
+        "description": "Solubility coefficients k[7,5]: C(T) = k0 + k1*T + k2*T^2. Columns: [k0, k1, k2, rho, e_over_d]",
+        "labels": [
+            "KDP neutral (0%)",
+            "KDP acid (9.83%)",
+            "KDP acid (12.5%)",
+            "DKDP neutral (0%)",
+            "DKDP acid (9.83%)",
+            "DKDP acid (12.67%)",
+            "DKDP acid (18.5%)"
+        ],
+        "coefficients": [
+            [0.123,    2.719e-3,  1.1087e-5,  1.0238,  0.5359],
+            [0.15,     3.249e-3,  0.0,        1.075,   0.518],
+            [0.161,    3.116e-3,  0.0,        1.0966,  0.4962],
+            [0.166,    3.7e-3,    0.0,        1.137,   0.532],
+            [0.2061,   3.171e-3,  0.0,        1.207,   0.429],
+            [0.2145,   3.079e-3,  0.0,        1.215,   0.444],
+            [0.2303,   2.938e-3,  0.0,        1.265,   0.394]
+        ],
+        "acidity_percent": [0.0, 9.83, 12.5, 0.0, 9.83, 12.67, 18.5],
+        "salt_type": ["KDP", "KDP", "KDP", "DKDP", "DKDP", "DKDP", "DKDP"]
+    },
+
+    "wavelengths_nm": {
+        "led1": 470,
+        "led2": 590
+    },
+
+    "face_coefficients": {
+        "description": "Normalized lambda/(2n) for each face type. gran1 for prism {100}, gran2 for pyramid {101}",
+        "prism_100": {
+            "gran1": 0.47854,
+            "gran2": 0.9969
+        },
+        "pyramid_101": {
+            "gran1": 1.0,
+            "gran2": 1.0
+        }
+    },
+
+    "crystal_density": {
+        "KDP": 2.33,
+        "DKDP": 2.34
+    },
+
+    "thermal_expansion": {
+        "KDP": 0.000347,
+        "DKDP": 0.00044
+    },
+
+    "arrhenius": {
+        "A": 9.11e13,
+        "B": 8336.42,
+        "ln_A": 30.229
+    },
+
+    "reference_curves": {
+        "description": "Polynomial reference curves Si(j,te) = a[j,0] + a[j,1]*te + a[j,2]*te^2 for j=0..7. Two sets: Cfe=0 (clean) and Cfe=16ppm (contaminated). Coefficients from Mathcad MCD files (binary format). Values below are placeholders — need extraction from actual MCD files or manual input by operator.",
+        "Cfe_0_ppm": {
+            "note": "Clean solution reference. PLACEHOLDER — needs real coefficients from MCD.",
+            "coefficients": [
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0]
+            ]
+        },
+        "Cfe_16_ppm": {
+            "note": "Contaminated solution reference. PLACEHOLDER — needs real coefficients from MCD.",
+            "coefficients": [
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0]
+            ]
+        }
+    }
+}
