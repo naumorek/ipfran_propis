@@ -329,16 +329,21 @@ def build_phase_dstep(S1: np.ndarray, es: np.ndarray,
                       end_pos: int,
                       d: float = 3.3,
                       co0: float = 0.06446, co1: float = 1.92e-5,
-                      nn: int = -1) -> tuple:
+                      nn: int = -1,
+                      im: int = 0,
+                      ww: float = 1.0) -> tuple:
     """
     Build dense phase function at d-step spacing and compute growth rates.
 
-    Mathcad algorithm:
-    1. Sample signal at positions i*d (d=3.3 by default) from 0 to end_pos
+    Mathcad algorithm (zs formula, screenshots 28-29):
+    1. Sample signal at positions i*d from 0 to end_pos
     2. Compute phase via arcsin interpolation between refined extrema
     3. Clamp phase to monotone non-decreasing past last extremum
-    4. Compute rate from phase differences: R = dphase/(pi*x*d) * 30
-    5. Smooth rates with LOWESS
+    4. Compute L1 from slope of phase vs temperature in growth zone
+    5. Compute rate from phase differences with refractive index correction:
+       R[i] = [L1*x0*(1/x2-1/x1) + 1/π*(phase[i+1]/x2-phase[i]/x1)]
+              * 30 / (d * ww)
+    6. Raw rates are returned — LOESS smoothing is applied externally on R(dT)
 
     Parameters
     ----------
@@ -356,11 +361,15 @@ def build_phase_dstep(S1: np.ndarray, es: np.ndarray,
         Optical coefficients: x = co0 - co1*T.
     nn : int
         Direction flag (-1 for growth, +1 for dissolution).
+    im : int
+        Precise dead zone start position (for reference temperature x0).
+    ww : float
+        Correction factor (default 1.0).
 
     Returns
     -------
     rates : ndarray
-        Growth rate in mm/day (smoothed) at each d-step interval.
+        Growth rate in mm/day (raw, unsmoothed) at each d-step interval.
     rate_temps : ndarray
         Average temperature (°C) at each rate point.
     rate_positions : ndarray
@@ -415,8 +424,12 @@ def build_phase_dstep(S1: np.ndarray, es: np.ndarray,
             else:
                 phases[i] = (np.pi / 2.0) * (n - 1)
         else:
-            # Past last extremum: extrapolate using last two extrema
-            denom = ext_val[last_ext_idx] - ext_val[last_ext_idx - 1]
+            # Past last extremum: continuing into next half-period
+            # After a max, signal decreases toward next min (growth continues)
+            # After a min, signal increases toward next max
+            # Denominator sign flips: use val[last-1] - val[last]
+            # so that phase INCREASES as signal moves away from last extremum
+            denom = ext_val[last_ext_idx - 1] - ext_val[last_ext_idx]
             if abs(denom) > 1e-15:
                 arg = np.clip(
                     (signals[i] - ext_val[last_ext_idx]) / denom, -1.0, 1.0
@@ -425,59 +438,78 @@ def build_phase_dstep(S1: np.ndarray, es: np.ndarray,
             else:
                 phases[i] = (np.pi / 2.0) * last_ext_idx
 
-    # Clamp phase to monotone non-decreasing past last extremum
-    # In dead zone the signal is flat, phase should not decrease
+    # Enforce monotonicity only in deep dead zone (noise protection)
+    # After last extremum the phase now correctly increases (partial fringe),
+    # but in the dead zone where signal is truly flat, noise can cause
+    # small phase fluctuations — clamp only where phase tries to go backward
+    # significantly (more than noise level)
     last_ext_dense_idx = int(ext_pos[-1] / d)
     last_ext_dense_idx = min(last_ext_dense_idx, len(phases) - 1)
     max_phase = phases[last_ext_dense_idx]
     for i in range(last_ext_dense_idx + 1, len(phases)):
-        if phases[i] < max_phase:
-            phases[i] = max_phase
-        else:
+        if phases[i] > max_phase:
             max_phase = phases[i]
+        elif phases[i] < max_phase - 0.05:
+            # Allow small noise fluctuations, clamp only significant drops
+            phases[i] = max_phase
 
-    # Compute L = phase / (pi * x) at each d-step position (optical path in mm)
-    x_arr = co0 - co1 * temps
-    x_arr = np.where(np.abs(x_arr) < 1e-15, 1e-15, x_arr)
-    L_raw = phases / (np.pi * x_arr)
+    # --- Mathcad zs formula: rate from phase differences ---
+    # Reference temperature at im (saturation point)
+    im_clamped = min(im, len(temp_c) - 1)
+    T_ref = temp_c[im_clamped]
+    x0 = co0 - co1 * T_ref
 
-    # Smooth L with LOWESS (approximating Mathcad's supsmooth on L)
-    # Smoothing L (cumulative) is much more stable than smoothing rates (derivative)
-    n_pts = len(L_raw)
-    frac = max(0.02, min(0.05, 50.0 / n_pts))
-    try:
-        from statsmodels.nonparametric.smoothers_lowess import lowess
-        result = lowess(L_raw, np.arange(n_pts),
-                        frac=frac, return_sorted=True)
-        L_smooth = result[:, 1]
-    except ImportError:
-        window = max(7, int(n_pts * frac))
-        if window % 2 == 0:
-            window += 1
-        L_smooth = sig.savgol_filter(L_raw, window, 3)
+    # Compute L1 = -Q / (π · co1) where Q = slope(phase vs temperature)
+    # in the growth zone (between first extremum and im)
+    first_ext_didx = max(0, int(np.ceil(ext_pos[0] / d)))
+    im_didx = min(int(np.floor(im / d)), g)
+    if im_didx > first_ext_didx + 5:
+        growth_phases = phases[first_ext_didx:im_didx + 1]
+        growth_temps = temps[first_ext_didx:im_didx + 1]
+        # Q = slope(phase vs temperature)
+        if len(growth_temps) > 2 and np.std(growth_temps) > 1e-10:
+            Q = np.polyfit(growth_temps, growth_phases, 1)[0]
+        else:
+            Q = 0.0
+        L1 = -Q / (np.pi * co1) if abs(co1) > 1e-20 else 0.0
+    else:
+        L1 = 0.0
 
-    # Rate from L differences: R = dL / d * 30 (mm/day)
-    raw_rates = np.diff(L_smooth) / d * 30.0
-    # Ensure non-negative rates (growth phase)
-    rates = np.maximum(raw_rates, 0.0)
-
-    n_rates = len(rates)
-
-    # Average temperature for each rate interval
+    # Compute rates using Mathcad zs formula (screenshots 28-29):
+    # z[i,1] = [L1*x0*(1/x2 - 1/x1) + 1/π*(phase[i+1]/x2 - phase[i]/x1)]
+    #           * 30 / ((pos[i+1] - pos[i]) * ww)
+    n_rates = g  # g+1 positions → g rate intervals
+    rates = np.zeros(n_rates)
     rate_temps = np.zeros(n_rates)
     rate_positions = np.zeros(n_rates)
+
     for i in range(n_rates):
         p1 = positions[i]
         p2 = positions[i + 1]
+
+        # Average temperature for this interval
         y1 = int(np.ceil(p1))
         y2 = int(np.floor(p2))
         y1 = max(0, min(y1, len(temp_c) - 1))
         y2 = max(0, min(y2, len(temp_c) - 1))
         if y2 >= y1:
-            rate_temps[i] = np.mean(temp_c[y1:y2 + 1])
+            rate_temps[i] = 0.5 * (temp_c[y1] + temp_c[y2])
         else:
             rate_temps[i] = temps[i]
         rate_positions[i] = (p1 + p2) / 2.0
+
+        # Optical path coefficients at T1 and T2
+        x1 = co0 - co1 * temps[i]
+        x2 = co0 - co1 * temps[i + 1]
+        if abs(x1) < 1e-15 or abs(x2) < 1e-15:
+            rates[i] = 0.0
+            continue
+
+        # Mathcad zs formula
+        delta_pos = p2 - p1  # = d
+        refractive_correction = L1 * x0 * (1.0 / x2 - 1.0 / x1)
+        phase_term = (1.0 / np.pi) * (phases[i + 1] / x2 - phases[i] / x1)
+        rates[i] = (refractive_correction + phase_term) * 30.0 / (delta_pos * ww)
 
     return rates, rate_temps, rate_positions, phases
 

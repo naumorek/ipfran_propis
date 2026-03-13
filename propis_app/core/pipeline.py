@@ -85,6 +85,13 @@ class PipelineResult:
     fit_result: Optional[PowerLawResult] = None
     bcf_result: Optional[object] = None  # BCFResult from modern pipeline
 
+    # Dense d-step data (from build_phase_dstep, ~2000+ points including dead zone)
+    # Used for Mathcad-style F1 LOESS curve
+    dense_rate: Optional[np.ndarray] = None          # R (mm/day)
+    dense_temperature: Optional[np.ndarray] = None   # T (°C)
+    dense_sigma: Optional[np.ndarray] = None         # σ (%)
+    dense_supercooling: Optional[np.ndarray] = None  # dT = tn - T (°C)
+
     # Diagnostic: number of extrema found
     n_extrema: int = 0
 
@@ -285,10 +292,15 @@ def run_classic(prn: PrnData, params: CycleParams,
     dense_rates, dense_temps, dense_pos, _ = build_phase_dstep(
         smoothed, es, temp_c, end_pos=isat1, d=d,
         co0=co0, co1=co1_opt, nn=-1,
+        im=im, ww=ww,
     )
+    # Store dense data for plotting (Mathcad F1 curve uses this)
+    dense_sigma_arr = None
+    dense_supercooling_arr = None
     if len(dense_rates) > 10:
-        dense_sigma = supersaturation_percent(dense_temps, tn, sol)
-        s2 = compute_s2_mathcad(dense_sigma, dense_rates)
+        dense_sigma_arr = supersaturation_percent(dense_temps, tn, sol)
+        dense_supercooling_arr = supercooling(dense_temps, tn)
+        s2 = compute_s2_mathcad(dense_sigma_arr, dense_rates)
     else:
         # Fallback to coarse data
         s2 = compute_s2_mathcad(sigma, rates)
@@ -321,6 +333,10 @@ def run_classic(prn: PrnData, params: CycleParams,
         dtau=dtau, ww=ww, d=d,
         growth_rate=growth,
         fit_result=fit,
+        dense_rate=dense_rates if len(dense_rates) > 10 else None,
+        dense_temperature=dense_temps if len(dense_rates) > 10 else None,
+        dense_sigma=dense_sigma_arr,
+        dense_supercooling=dense_supercooling_arr,
         n_extrema=n_extrema,
     )
 
@@ -556,6 +572,7 @@ def run_modern(prn: PrnData, params: CycleParams,
         dense_rates, dense_temps, _, _ = build_phase_dstep(
             smoothed_for_s2, es_s2, temp_c, end_pos=isat1, d=d,
             co0=co0, co1=co1_opt, nn=-1,
+            im=im, ww=ww,
         )
         if len(dense_rates) > 10:
             dense_sigma = supersaturation_percent(dense_temps, tn, sol)
