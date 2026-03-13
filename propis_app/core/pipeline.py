@@ -474,11 +474,13 @@ def run_modern(prn: PrnData, params: CycleParams,
     x_arr = np.where(np.abs(x_arr) < 1e-15, 1e-15, x_arr)
     rate_continuous = np.abs(inst_freq_smooth) * 30.0 / x_arr  # mm/day
 
-    # Zero out rates where envelope is small (dead zone / no oscillations).
-    # The envelope of the bandpass signal indicates fringe amplitude.
-    # In dead zone, envelope → 0 → rate is noise, not real.
-    env_threshold = 0.25 * np.max(envelope_smooth)
-    rate_continuous = np.where(envelope_smooth > env_threshold, rate_continuous, 0.0)
+    # Scale rates by envelope: in dead zone envelope→0, so rate naturally→0.
+    # Soft weighting instead of hard threshold — preserves transition zone
+    # near dead zone (same philosophy as classic: let LOESS smooth raw data).
+    env_max = np.max(envelope_smooth)
+    if env_max > 1e-10:
+        env_weight = np.clip(envelope_smooth / (0.15 * env_max), 0.0, 1.0)
+        rate_continuous = rate_continuous * env_weight
 
     # Subsample at d-step spacing (like classic dense sampling)
     # This gives ~2000 evenly spaced points including dead zone
@@ -489,9 +491,6 @@ def run_modern(prn: PrnData, params: CycleParams,
     positions = np.arange(g + 1) * d
     rates = np.interp(positions, np.arange(m), rate_continuous)
     rate_temps = np.interp(positions, np.arange(len(temp_c)), temp_c)
-
-    # Non-negative rates in growth zone
-    rates = np.maximum(rates, 0.0)
 
     # Rate times
     rate_times = np.zeros_like(rates)
@@ -596,6 +595,10 @@ def run_modern(prn: PrnData, params: CycleParams,
     else:
         Sigm = float(supersaturation_percent(t_im, tn, sol))
 
+    # Dense data for F1 LOESS plotting (Hilbert-based rates at d-step spacing)
+    dense_sigma_arr = supersaturation_percent(rate_temps, tn, sol)
+    dense_supercooling_arr = supercooling(rate_temps, tn)
+
     return PipelineResult(
         filename=str(prn.filepath.name),
         cycle_index=0,
@@ -608,6 +611,10 @@ def run_modern(prn: PrnData, params: CycleParams,
         growth_rate=growth,
         fit_result=fit,
         bcf_result=bcf_fit,
+        dense_rate=rates,
+        dense_temperature=rate_temps,
+        dense_sigma=dense_sigma_arr,
+        dense_supercooling=dense_supercooling_arr,
         n_extrema=n_extrema,
     )
 
