@@ -178,7 +178,7 @@ class MainWindow(QMainWindow):
                 self._result_modern = run_modern(
                     self._prn_data, params,
                     salt=salt, acid=acid, face=face,
-                    channel=1,
+                    channel=1, tn_manual=tn_manual,
                 )
 
             # Show primary result

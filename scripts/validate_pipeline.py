@@ -122,10 +122,10 @@ def run_validation():
             print(f"  CLASSIC ERROR {mcd_name}: {e}")
             classic = None
 
-        # Run modern
+        # Run modern (same params as classic for fair comparison)
         try:
             modern = run_modern(prn, params, salt=1, acid=0, face=0,
-                                channel=1, dtau=0.055)
+                                channel=1, dtau=0.055, tn_manual=tn)
             all_modern.append(modern)
         except Exception as e:
             print(f"  MODERN ERROR {mcd_name}: {e}")
