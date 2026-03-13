@@ -2,26 +2,25 @@
 Main application window.
 
 Layout:
-  - Top toolbar: file loading, mode selection, preprocessing toggle
-  - Left panel: parameter controls (sliders, inputs)
+  - Top toolbar: file loading, mode/salt/acid/face selection
   - Central area: tabbed views (signal, preprocessing, kinetics, results, comparison)
-  - Bottom: status bar with current parameters
+  - Bottom: status bar
 """
 
 from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtWidgets import (
-    QMainWindow, QTabWidget, QToolBar, QStatusBar, QFileDialog,
+    QMainWindow, QTabWidget, QStatusBar, QFileDialog,
     QVBoxLayout, QHBoxLayout, QWidget, QLabel, QComboBox,
-    QPushButton, QCheckBox, QMessageBox, QSplitter,
+    QPushButton, QCheckBox, QMessageBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QAction
 
 from ..core.prn_reader import PrnData, read_prn
-from ..core.batch import ProcessingParams, ProcessingResult, process_single
-from ..core.solubility import get_solubility_set
+from ..core.pipeline import (
+    CycleParams, PipelineResult, run_classic, run_modern,
+)
 
 from .signal_view import SignalView
 from .preprocessing_view import PreprocessingView
@@ -34,8 +33,8 @@ from .batch_view import BatchView
 class MainWindow(QMainWindow):
     """Main application window for crystal growth data processing."""
 
-    data_loaded = pyqtSignal(object)       # PrnData
-    result_ready = pyqtSignal(object)      # ProcessingResult
+    data_loaded = pyqtSignal(object)
+    result_ready = pyqtSignal(object)
 
     def __init__(self):
         super().__init__()
@@ -43,20 +42,18 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1200, 800)
 
         self._prn_data: Optional[PrnData] = None
-        self._params = ProcessingParams()
-        self._result_classic: Optional[ProcessingResult] = None
-        self._result_modern: Optional[ProcessingResult] = None
+        self._result_classic: Optional[PipelineResult] = None
+        self._result_modern: Optional[PipelineResult] = None
 
         self._setup_ui()
         self._connect_signals()
 
     def _setup_ui(self):
-        # Central widget
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        # Top controls
+        # Top controls row
         top = QHBoxLayout()
 
         self._btn_open = QPushButton("Открыть PRN...")
@@ -69,7 +66,7 @@ class MainWindow(QMainWindow):
 
         top.addWidget(QLabel("Кислота:"))
         self._combo_acid = QComboBox()
-        self._combo_acid.addItems(["Нейтр.", "9.83%", "12.5%/12.67%", "18.5%"])
+        self._combo_acid.addItems(["Нейтр.", "9.83%", "12.5%", "18.5%"])
         top.addWidget(self._combo_acid)
 
         top.addWidget(QLabel("Грань:"))
@@ -79,14 +76,12 @@ class MainWindow(QMainWindow):
 
         top.addWidget(QLabel("Режим:"))
         self._combo_mode = QComboBox()
-        self._combo_mode.addItems(["Классический", "Современный", "Оба (сравнение)"])
+        self._combo_mode.addItems(["Классический", "Современный", "Оба"])
         top.addWidget(self._combo_mode)
-
-        self._chk_preprocess = QCheckBox("Предобработка")
-        top.addWidget(self._chk_preprocess)
 
         self._btn_process = QPushButton("Обработать")
         self._btn_process.setEnabled(False)
+        self._btn_process.setStyleSheet("font-weight: bold;")
         top.addWidget(self._btn_process)
 
         top.addStretch()
@@ -138,78 +133,75 @@ class MainWindow(QMainWindow):
             self._status.showMessage(
                 f"Загружен: {Path(filepath).name} — "
                 f"{self._prn_data.n_samples} отсчётов, "
-                f"T: {self._prn_data.temp_c.min():.1f}–{self._prn_data.temp_c.max():.1f}°C"
+                f"T: {self._prn_data.temp_c.min():.1f}–"
+                f"{self._prn_data.temp_c.max():.1f}°C"
             )
             self._signal_view.set_data(self._prn_data)
             self.data_loaded.emit(self._prn_data)
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить файл:\n{e}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить:\n{e}")
 
-    def _get_params(self) -> ProcessingParams:
-        """Collect parameters from UI controls."""
-        params = ProcessingParams()
-        params.salt = self._combo_salt.currentIndex() + 1
-        params.acid = self._combo_acid.currentIndex()
-        params.face = self._combo_face.currentIndex()
-        params.use_preprocessing = self._chk_preprocess.isChecked()
-
-        mode_idx = self._combo_mode.currentIndex()
-        params.mode = ["classic", "modern", "both"][mode_idx]
-
-        # Get boundaries from signal view
-        n1, n2, im, isat = self._signal_view.get_boundaries()
-        params.n1 = n1
-        params.n2 = n2
-        params.im = im
-        params.isat = isat
-
-        return params
+    def _get_cycle_params(self) -> CycleParams:
+        """Build CycleParams from signal view boundaries."""
+        b = self._signal_view.get_boundaries()
+        return CycleParams(
+            n1=b["n1"], n2=b["n2"],
+            im=b["im"], isat=b["isat"],
+            im1=b["im1"], isat1=b["isat1"],
+        )
 
     def _process(self):
         if self._prn_data is None:
             return
 
-        params = self._get_params()
+        salt = self._combo_salt.currentIndex() + 1   # 1=KDP, 2=DKDP
+        acid = self._combo_acid.currentIndex()        # 0=нейтр
+        face = self._combo_face.currentIndex()        # 0=призма
+        mode_idx = self._combo_mode.currentIndex()    # 0=classic,1=modern,2=both
+        tn_manual = self._signal_view.get_tn_manual()
+
+        params = self._get_cycle_params()
+
         self._status.showMessage("Обработка...")
+        self._result_classic = None
+        self._result_modern = None
 
         try:
-            # Classic mode
-            if params.mode in ("classic", "both"):
-                p = ProcessingParams(**{
-                    k: v for k, v in params.__dict__.items()
-                })
-                p.mode = "classic"
-                self._result_classic = process_single(self._prn_data, p)
+            if mode_idx in (0, 2):  # classic or both
+                self._result_classic = run_classic(
+                    self._prn_data, params,
+                    salt=salt, acid=acid, face=face,
+                    channel=1, tn_manual=tn_manual,
+                )
 
-            # Modern mode
-            if params.mode in ("modern", "both"):
-                p = ProcessingParams(**{
-                    k: v for k, v in params.__dict__.items()
-                })
-                p.mode = "modern"
-                p.use_preprocessing = True  # modern mode needs preprocessing
-                self._result_modern = process_single(self._prn_data, p)
+            if mode_idx in (1, 2):  # modern or both
+                self._result_modern = run_modern(
+                    self._prn_data, params,
+                    salt=salt, acid=acid, face=face,
+                    channel=1,
+                )
 
-            # Update views
+            # Show primary result
             result = self._result_classic or self._result_modern
-            if result and result.success:
+            if result:
                 self._kinetic_view.set_result(result)
                 self._results_view.set_result(result)
+                self._tabs.setCurrentWidget(self._kinetic_view)
                 self._status.showMessage(
-                    f"Готово: tn={result.tn:.2f}°C, "
-                    f"Td={result.td:.2f}°C, "
-                    f"s1={result.s1:.4f}"
+                    f"Готово [{result.mode}]: "
+                    f"te={result.te:.2f}°C  tn={result.tn:.2f}°C  "
+                    f"Td={result.Td:.2f}°C  Sigm={result.Sigm:.3f}%  "
+                    f"s2={result.s2:.3f}  Sig035={result.Sig035:.2f}  "
+                    f"N={result.n_extrema}"
                 )
                 self.result_ready.emit(result)
-            elif result:
-                self._status.showMessage(f"Ошибка: {result.error}")
 
             # Comparison view
-            if params.mode == "both" and self._result_classic and self._result_modern:
+            if mode_idx == 2 and self._result_classic and self._result_modern:
                 self._comparison_view.set_results(
                     self._result_classic, self._result_modern
                 )
 
         except Exception as e:
-            self._status.showMessage(f"Ошибка обработки: {e}")
-            QMessageBox.critical(self, "Ошибка", str(e))
+            self._status.showMessage(f"Ошибка: {e}")
+            QMessageBox.critical(self, "Ошибка обработки", str(e))

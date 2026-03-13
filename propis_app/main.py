@@ -11,16 +11,23 @@ Usage:
 import sys
 from pathlib import Path
 
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
-
-from gui.main_window import MainWindow
-
 
 def main():
+    # Ensure package is importable
+    app_dir = Path(__file__).parent
+    project_root = app_dir.parent
+    for p in [str(project_root), str(app_dir)]:
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    from PyQt6.QtWidgets import QApplication
+
+    from propis_app.gui.main_window import MainWindow
+
     app = QApplication(sys.argv)
     app.setApplicationName("Propis IPFRAN")
     app.setOrganizationName("IPF RAN")
+    app.setStyle("Fusion")
 
     window = MainWindow()
     window.show()
@@ -29,11 +36,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # Ensure the package is importable
-    app_dir = Path(__file__).parent
-    if str(app_dir) not in sys.path:
-        sys.path.insert(0, str(app_dir))
-    if str(app_dir.parent) not in sys.path:
-        sys.path.insert(0, str(app_dir.parent))
-
     main()

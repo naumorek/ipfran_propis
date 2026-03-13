@@ -1,190 +1,278 @@
 """
 Classic kinetic curve fitting: power law with dead zone.
 
-Model: G(σ) = s0 * (σ*0.01 - s1)^w
+Model: G(sigma) = s0 * (sigma - s1)^w   for sigma > s1, else 0
 
 where:
-  σ  — supersaturation (%)
-  s0 — kinetic coefficient
-  s1 — dead zone (fraction, usually negative)
-  w  — power exponent (usually 1 or 2)
+  sigma — supersaturation (%)  [NOT fraction!]
+  s0    — kinetic coefficient
+  s1    — dead zone threshold (%, can be negative)
+  w     — power exponent (usually 1)
 
-Optimization: grid search over s1, then least squares for s0
-(reproducing the Mathcad algorithm).
+Mathcad fitting: grid search over s1 (stepping through actual VX values
+with step 0.01), analytical s0 at each step, full residual including
+zero-rate points below threshold.
+
+s2: linear regression sqrt(R) vs sigma%, for 0 < R < 0.3.
+    s2 = -intercept / slope  (sigma% where sqrt(R) = 0).
+
+Sig035: LOESS smoothing of R(sigma%), then first sigma% where LOESS > 0.35.
+
+Reference: docs/mathcad_classic_algorithm_strict.md
 """
 
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from scipy.optimize import curve_fit
 
 
 @dataclass
 class PowerLawResult:
     """Result of power law fitting."""
     s0: float           # kinetic coefficient
-    s1: float           # dead zone (fraction of supersaturation)
+    s1: float           # dead zone (% supersaturation)
     w: float            # power exponent
     residual: float     # sum of squared residuals
-    sigma_percent: np.ndarray   # σ (%) — input data used for fit
-    rate_measured: np.ndarray   # measured rate (μm/min)
-    rate_fitted: np.ndarray     # fitted rate (μm/min)
-    sig035: float       # σ at which normalized F(σ) > 0.35
-    s2: float           # shape parameter (slope of linearized curve)
+    sigma_percent: np.ndarray   # sigma (%) — input data used for fit
+    rate_measured: np.ndarray   # measured rate (mm/day)
+    rate_fitted: np.ndarray     # fitted rate (mm/day)
+    sig035: float       # sigma at which LOESS(R) > 0.35
+    s2: float           # shape parameter: -intercept/slope of sqrt(R) vs sigma%
 
 
 def power_law_model(sigma_percent: np.ndarray, s0: float, s1: float,
                     w: float = 1.0) -> np.ndarray:
     """
-    G(σ) = s0 * (σ*0.01 - s1)^w  for σ*0.01 > s1, else 0.
+    G(sigma) = s0 * (sigma - s1)^w  for sigma > s1, else 0.
 
-    Parameters
-    ----------
-    sigma_percent : array
-        Supersaturation in %.
-    s0 : float
-        Kinetic coefficient.
-    s1 : float
-        Dead zone threshold (fraction).
-    w : float
-        Power exponent.
+    sigma and s1 are both in % units.
     """
-    sigma_frac = sigma_percent * 0.01
-    x = sigma_frac - s1
+    x = sigma_percent - s1
     x = np.maximum(x, 0)
     return s0 * np.power(x, w)
 
 
-def _grid_search_s1(sigma_percent: np.ndarray, rate: np.ndarray,
-                    w: float = 1.0,
-                    s1_range: tuple = (-0.02, 0.0),
-                    s1_steps: int = 200) -> tuple[float, float, float]:
+def _grid_search_s1_mathcad(sigma_percent: np.ndarray, rate: np.ndarray,
+                             w: float = 1.0) -> tuple:
     """
-    Grid search over s1, solving for s0 analytically at each step.
+    Mathcad-style grid search over s1.
 
-    This reproduces the Mathcad fitting approach.
+    Iterates through consecutive VX values with step 0.01.
+    For each candidate threshold x:
+      - Points with sigma > x: fit s0 = sum(rate * (sigma-x)^w) / sum((sigma-x)^(2w))
+      - Points with sigma <= x: contribute rate^2 to residual (model = 0)
+      - Total residual includes both parts
+
+    Returns (s0, s1, residual).
+    """
+    n = len(sigma_percent)
+    if n < 3:
+        return 0.0, 0.0, np.inf
+
+    # Sort by sigma
+    sort_idx = np.argsort(sigma_percent)
+    VX = sigma_percent[sort_idx]
+    VY = rate[sort_idx]
+
+    best_s0, best_s1, best_res = 0.0, 0.0, np.inf
+
+    # Iterate through all intervals between consecutive VX values
+    for i in range(n - 1):
+        # Step through x from VX[i] to VX[i+1] with step 0.01
+        x = VX[i]
+        while x < VX[i + 1]:
+            # Points above threshold (k >= i means sigma >= x approximately)
+            # Find first index where VX >= x
+            above = VX >= x
+            if np.sum(above) < 2:
+                x += 0.01
+                continue
+
+            VX_above = VX[above]
+            VY_above = VY[above]
+
+            # Analytical s0
+            xw = np.power(VX_above - x, w)
+            xw2 = np.power(VX_above - x, 2 * w)
+            denom = np.sum(xw2)
+            if denom < 1e-20:
+                x += 0.01
+                continue
+
+            q1 = np.sum(xw * VY_above)
+            s0_cand = q1 / denom
+
+            # Full residual (Mathcad formula):
+            # f = sum(VY[below]^2) + sum((s0*(VX[above]-x)^w - VY[above])^2)
+            below = ~above
+            f = np.sum(VY[below] ** 2)
+            f += np.sum((s0_cand * xw - VY_above) ** 2)
+
+            if f < best_res:
+                best_s0 = s0_cand
+                best_s1 = x
+                best_res = f
+
+            x += 0.01
+
+    return best_s0, best_s1, best_res
+
+
+def compute_sig035_loess(sigma_percent: np.ndarray, rate: np.ndarray,
+                         span: float = 0.2) -> float:
+    """
+    Sig035: first sigma% where LOESS-smoothed R(sigma) > 0.35 mm/day.
+
+    Mathcad uses loess() + interp() with span=0.2 (or span1).
+
+    Parameters
+    ----------
+    sigma_percent : array
+        Supersaturation values (%), sorted by sigma.
+    rate : array
+        Growth rate (mm/day), corresponding to sigma_percent.
+    span : float
+        LOESS span parameter.
 
     Returns
     -------
-    s0, s1, residual
+    sig035 : float
+        Supersaturation (%) at which smoothed R first exceeds 0.35.
     """
-    sigma_frac = sigma_percent * 0.01
-    best_s0, best_s1, best_residual = 0.0, 0.0, np.inf
-
-    s1_values = np.linspace(s1_range[0], s1_range[1], s1_steps)
-
-    for s1 in s1_values:
-        x = sigma_frac - s1
-        mask = x > 0
-        if np.sum(mask) < 3:
-            continue
-
-        xw = np.power(x[mask], w)
-        y = rate[mask]
-
-        # Weighted least squares: s0 = Σ(y * xw) / Σ(xw^2)
-        xw2 = np.power(x[mask], 2 * w)
-        denom = np.sum(xw2)
-        if denom < 1e-20:
-            continue
-
-        s0 = np.sum(y * xw) / denom
-
-        if s0 <= 0:
-            continue
-
-        # Residual
-        fitted = s0 * xw
-        residual = np.sum((y - fitted) ** 2)
-
-        if residual < best_residual:
-            best_s0 = s0
-            best_s1 = s1
-            best_residual = residual
-
-    return best_s0, best_s1, best_residual
-
-
-def compute_sig035(sigma_percent: np.ndarray, rate: np.ndarray,
-                   s0: float, s1: float, w: float) -> float:
-    """
-    Find σ at which normalized F(σ) > 0.35.
-
-    F(σ) is the cumulative fraction of rate relative to fitted maximum.
-    """
-    if len(rate) == 0 or s0 == 0:
+    if len(sigma_percent) < 5:
         return 0.0
 
     # Sort by sigma
     sort_idx = np.argsort(sigma_percent)
-    sigma_sorted = sigma_percent[sort_idx]
-    rate_sorted = rate[sort_idx]
+    VX = sigma_percent[sort_idx]
+    VY = rate[sort_idx]
 
-    # Compute fitted values
-    fitted = power_law_model(sigma_sorted, s0, s1, w)
-    max_fitted = np.max(fitted)
-    if max_fitted < 1e-20:
-        return 0.0
+    # Use statsmodels LOWESS if available, otherwise simple moving average
+    try:
+        from statsmodels.nonparametric.smoothers_lowess import lowess
+        # lowess returns (x, y_smooth) sorted by x
+        result = lowess(VY, VX, frac=span, return_sorted=True)
+        VX_smooth = result[:, 0]
+        VY_smooth = result[:, 1]
+    except ImportError:
+        # Fallback: simple moving average
+        window = max(3, int(len(VX) * span))
+        if window % 2 == 0:
+            window += 1
+        kernel = np.ones(window) / window
+        VY_smooth = np.convolve(VY, kernel, mode='same')
+        VX_smooth = VX
 
-    # Normalized: F(σ) = fitted / max_fitted
-    F = fitted / max_fitted
+    # Find first sigma where smoothed R > 0.35
+    for i in range(len(VX_smooth)):
+        if VY_smooth[i] > 0.35:
+            return float(VX_smooth[i])
 
-    for i in range(len(F)):
-        if F[i] > 0.35:
-            return float(sigma_sorted[i])
-
-    return float(sigma_sorted[-1])
+    return float(VX_smooth[-1]) if len(VX_smooth) > 0 else 0.0
 
 
-def compute_s2(sigma_percent: np.ndarray, rate: np.ndarray) -> float:
+def compute_s2_mathcad(sigma_percent: np.ndarray, rate: np.ndarray) -> float:
     """
-    Compute shape parameter s2 from linear regression of log-log plot.
+    Mathcad s2: linear regression sqrt(R) vs sigma%, for 0 < R < 0.3.
 
-    ln(R) = ln(s0) + w * ln(σ - s1)
-    s2 corresponds to the slope parameter.
+    sqrt(R) = Q1 + Q2 * sigma%
+    s2 = -Q1 / Q2  (x-intercept where sqrt(R) = 0)
+
+    Data is taken from z (unsorted, in original order), and we stop
+    at the first negative R (transition to dissolution).
+
+    Parameters
+    ----------
+    sigma_percent : array
+        Supersaturation (%), in original order (not sorted).
+    rate : array
+        Growth rate (mm/day), in original order.
+
+    Returns
+    -------
+    s2 : float
     """
     if len(rate) < 3:
         return 0.0
 
-    mask = (rate > 0) & (sigma_percent > 0)
-    if np.sum(mask) < 3:
+    # Mathcad algorithm: stop at first R < 0, collect 0 < R < 0.3.
+    # Additional sigma > 0 filter compensates for LOWESS smoothing artifacts
+    # that produce tiny non-zero rates in the dead zone (sigma ≈ 0).
+    sigma_sel = []
+    sqrt_r_sel = []
+
+    for i in range(len(rate)):
+        if rate[i] < 0:
+            break
+        if 0 < rate[i] < 0.3 and sigma_percent[i] > 0:
+            sigma_sel.append(sigma_percent[i])
+            sqrt_r_sel.append(np.sqrt(rate[i]))
+
+    if len(sigma_sel) < 3:
         return 0.0
 
-    log_r = np.log(rate[mask])
-    log_s = np.log(sigma_percent[mask])
+    x = np.array(sigma_sel)
+    y = np.array(sqrt_r_sel)
 
-    # Linear regression
-    coeffs = np.polyfit(log_s, log_r, 1)
-    return float(coeffs[0])  # slope
+    # Linear regression: y = Q1 + Q2 * x
+    # Using numpy polyfit (degree 1): coeffs[0] = Q2 (slope), coeffs[1] = Q1 (intercept)
+    try:
+        coeffs = np.polyfit(x, y, 1)
+        Q2 = coeffs[0]  # slope
+        Q1 = coeffs[1]  # intercept
+
+        if abs(Q2) < 1e-15:
+            return 0.0
+
+        s2 = -Q1 / Q2
+        return float(s2)
+    except (np.linalg.LinAlgError, ValueError):
+        return 0.0
+
+
+# Legacy API — kept for backward compatibility
+def compute_sig035(sigma_percent: np.ndarray, rate: np.ndarray,
+                   s0: float, s1: float, w: float) -> float:
+    """Legacy: analytical Sig035 from power law. Use compute_sig035_loess instead."""
+    return compute_sig035_loess(sigma_percent, rate)
+
+
+def compute_s2(sigma_percent: np.ndarray, rate: np.ndarray,
+               s1: float = 0.0) -> float:
+    """Legacy: compute s2. Now delegates to Mathcad formula."""
+    return compute_s2_mathcad(sigma_percent, rate)
 
 
 def fit_power_law(sigma_percent: np.ndarray, rate: np.ndarray,
                   w: float = 1.0,
                   s1_range: Optional[tuple] = None,
-                  use_scipy: bool = True) -> PowerLawResult:
+                  use_scipy: bool = False) -> PowerLawResult:
     """
-    Fit power law G(σ) = s0 * (σ*0.01 - s1)^w to measured data.
+    Fit power law G(sigma) = s0 * (sigma - s1)^w to measured data.
+
+    Uses Mathcad-style grid search: iterate through actual data values
+    with step 0.01, include zero-rate points in residual.
 
     Parameters
     ----------
     sigma_percent : array
         Supersaturation in %.
     rate : array
-        Measured growth rate (μm/min).
+        Measured growth rate (mm/day).
     w : float
         Power exponent (fixed). Default 1.0.
     s1_range : tuple, optional
-        Range for s1 search. If None, auto-determined from data.
+        Not used in Mathcad mode (kept for API compatibility).
     use_scipy : bool
-        If True, refine with scipy.optimize after grid search.
+        Not used in Mathcad mode.
 
     Returns
     -------
     PowerLawResult
     """
     # Filter valid data
-    valid = np.isfinite(sigma_percent) & np.isfinite(rate) & (rate > 0)
+    valid = np.isfinite(sigma_percent) & np.isfinite(rate) & (rate >= 0)
     sigma_v = sigma_percent[valid]
     rate_v = rate[valid]
 
@@ -196,41 +284,17 @@ def fit_power_law(sigma_percent: np.ndarray, rate: np.ndarray,
             sig035=0, s2=0,
         )
 
-    # Auto s1 range
-    if s1_range is None:
-        sigma_min = np.min(sigma_v) * 0.01
-        s1_range = (sigma_min - 0.01, sigma_min + 0.005)
-
-    # Grid search
-    s0, s1, residual = _grid_search_s1(sigma_v, rate_v, w=w, s1_range=s1_range)
-
-    # Refine with scipy
-    if use_scipy and s0 > 0:
-        try:
-            def model(sigma, s0_opt, s1_opt):
-                return power_law_model(sigma, s0_opt, s1_opt, w)
-
-            popt, pcov = curve_fit(model, sigma_v, rate_v,
-                                   p0=[s0, s1 * 100],
-                                   bounds=([0, -10], [np.inf, 10]),
-                                   maxfev=5000)
-            s0_opt, s1_opt_pct = popt
-            s1_opt = s1_opt_pct  # s1 in the model is already used as fraction
-            fitted = model(sigma_v, s0_opt, s1_opt_pct)
-            res = np.sum((rate_v - fitted) ** 2)
-            if res < residual:
-                s0, s1, residual = s0_opt, s1_opt_pct * 0.01, res
-        except (RuntimeError, ValueError):
-            pass
+    # Mathcad grid search
+    s0, s1, residual = _grid_search_s1_mathcad(sigma_v, rate_v, w=w)
 
     # Compute fitted values
     rate_fitted = power_law_model(sigma_v, s0, s1, w)
 
-    # Sig035
-    sig035 = compute_sig035(sigma_v, rate_v, s0, s1, w)
+    # Sig035 via LOESS
+    sig035 = compute_sig035_loess(sigma_v, rate_v, span=0.2)
 
-    # s2 parameter
-    s2 = compute_s2(sigma_v, rate_v)
+    # s2 via sqrt(R) regression (use unsorted data!)
+    s2 = compute_s2_mathcad(sigma_percent, rate)
 
     return PowerLawResult(
         s0=s0, s1=s1, w=w, residual=residual,

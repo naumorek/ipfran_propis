@@ -35,6 +35,15 @@ class PrnData:
         return len(self.index)
 
     @property
+    def temp_c_mathcad(self) -> np.ndarray:
+        """Temperature as Mathcad computes it: temp_raw - 273.15.
+
+        PRN column 5 stores temp_raw - 273.00, but Mathcad uses
+        a[,4] - 273.15, giving 0.15°C lower values.
+        """
+        return self.temp_raw - 273.15
+
+    @property
     def dt(self) -> float:
         """Average time step in seconds."""
         if len(self.time_seconds) < 2:
