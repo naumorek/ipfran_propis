@@ -690,35 +690,46 @@ def run_mathcad(prn_path, **kwargs):
     # суммы от k=i до n (все сортированные данные).
     # Это эквивалентно Mathcad, если данные z совпадают.
 
-    # Grid search по VX1/VY1 (обрезанные, σ > dead zone boundary)
-    # Используем VY1_smooth (LOESS-сглаженные) для стабильного фита
-    # Mathcad использует raw VY1, но в Mathcad R-данные гладкие по arcsin.
-    # Наши R шумнее → LOESS-сглаживание компенсирует.
-    VY1_smooth = np.array([float(F1_func(x)) for x in VX1])
-    VY1_smooth = np.maximum(VY1_smooth, 0.0)  # F1 может быть < 0 в dead zone
+    # Mathcad (скриншот hires/7.jpg):
+    # n := rows(VX1) - 1 = 273
+    # for i ∈ 0..n-1:
+    #   for x ∈ VX_i, VX_i + 0.01..VX_{i+1}:    ← итерация по VX (полный!)
+    #     q1 ← Σ(k=i..n) (VX1_k - x)^w · VY1_k  ← суммы по VX1/VY1
+    #     q2 ← Σ(k=i..n) (VX1_k - x)^{2w}
+    #     ...
+    #
+    # КЛЮЧЕВОЕ: x итерируется по VX[i]..VX[i+1] (полный массив),
+    # но суммы берутся по VX1[i..n] и VY1[i..n] (обрезанный массив).
+    # Это даёт x < VX1[0] при ранних i (отрицательные σ%),
+    # а VX1 содержит только "хвост" до first VY>0.01.
 
-    n_grid = len(VX1) - 1
+    n_grid = len(VX1) - 1  # = rows(VX1) - 1
     print(f"Grid search: n = {n_grid} (VX1 range: {VX1[0]:.4f} to {VX1[-1]:.4f}%)")
 
-    for i in range(n_grid):
-        x_val = VX1[i]
-        x_end = VX1[i + 1]
+    for i in range(min(n_grid, len(VX) - 1)):
+        # x итерируется по VX[i]..VX[i+1] (полный массив!)
+        x_val = VX[i]
+        x_end = VX[min(i + 1, len(VX) - 1)]
         while x_val < x_end:
-            VX_above = VX1[i:]
-            VY_above = VY1_smooth[i:]
+            # Суммы по VX1[i..n] и VY1[i..n]
+            # Если i > n_grid → нет данных
+            i_clamped = min(i, n_grid)
+            VX1_above = VX1[i_clamped:]
+            VY1_above = VY1[i_clamped:]
 
-            xw = np.power(np.maximum(VX_above - x_val, 0), w_exp)
-            xw2 = np.power(np.maximum(VX_above - x_val, 0), 2 * w_exp)
+            xw = np.power(VX1_above - x_val, w_exp)
+            xw2 = np.power(VX1_above - x_val, 2 * w_exp)
             denom = np.sum(xw2)
             if denom < 1e-20:
                 x_val += 0.01
                 continue
 
-            q1_val = np.sum(xw * VY_above)
+            q1_val = np.sum(xw * VY1_above)
             s0_cand = q1_val / denom
 
-            f_res = np.sum(VY1_smooth[:i] ** 2)
-            f_res += np.sum((s0_cand * xw - VY_above) ** 2)
+            # f = Σ(k=0..i-1) VY1_k² + Σ(k=i..n) (q·(VX1_k-x)^w - VY1_k)²
+            f_res = np.sum(VY1[:i_clamped] ** 2)
+            f_res += np.sum((s0_cand * xw - VY1_above) ** 2)
 
             if f_res < best_min:
                 best_s0 = s0_cand
