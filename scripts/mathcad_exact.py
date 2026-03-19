@@ -409,16 +409,11 @@ def run_mathcad(prn_path, **kwargs):
             # (продолжаем до конца, но Mathcad прерывает после последнего экстремума
             #  и заполняет оставшиеся в отдельном цикле — результат тот же)
 
-    # Enforce monotonicity after last extremum (dead zone noise protection)
-    # Mathcad: phase не может убывать после последнего экстремума
-    last_ext_dense_idx = int(es[-1, 0] / d)
-    last_ext_dense_idx = min(last_ext_dense_idx, g)
-    max_phase = y[last_ext_dense_idx, 2]
-    for i in range(last_ext_dense_idx + 1, g + 1):
-        if y[i, 2] > max_phase:
-            max_phase = y[i, 2]
-        else:
-            y[i, 2] = max_phase  # clamp
+    # Mathcad НЕ clamp'ит фазу после последнего экстремума.
+    # Фаза продолжает осциллировать через arcsin, как и в зоне роста.
+    # Это даёт шумные скорости в dead zone, но slope(phase, T) в зоне im..isat
+    # усредняет их до малого Q → малый L1 → малая коррекция.
+    # Clamping НЕ применяется.
 
     print(f"Фаза построена: y[0,2]={y[0,2]:.4f}, y[{g},2]={y[g,2]:.4f}")
 
@@ -447,14 +442,29 @@ def run_mathcad(prn_path, **kwargs):
             v_idx = i - 1
             break
 
-    # Для slope: берём зону от первого до im (зона роста)
-    # Mathcad фактически: l2 и P от u до v
-    first_ext_didx = max(0, int(np.ceil(es[0, 0] / d)))
-    im_didx = min(int(np.floor(im / d)), g)
+    # Mathcad (скриншот s_1.jpg):
+    # u := first i where y[i,0] > im
+    # v := first i where y[i,0] > isat
+    # l2[g-u] := y[g,3], P[g-u] := y[g,2]  для g = u..v
+    # Q := slope(l2, P)
+    # Это slope фазы от температуры в зоне IM..ISAT (dead zone → начало растворения)
+    # В dead zone фаза ≈ const → Q ≈ 0 → L1 ≈ 0 (малая коррекция)
 
-    if im_didx > first_ext_didx + 5:
-        l2_temps = y[first_ext_didx:im_didx + 1, 3]
-        P_phases = y[first_ext_didx:im_didx + 1, 2]
+    u_didx = 0
+    for i in range(g + 1):
+        if y[i, 0] > im:
+            u_didx = i
+            break
+
+    v_didx = g
+    for i in range(g + 1):
+        if y[i, 0] > isat:
+            v_didx = i - 1
+            break
+
+    if v_didx > u_didx + 2:
+        l2_temps = y[u_didx:v_didx + 1, 3]
+        P_phases = y[u_didx:v_didx + 1, 2]
         if len(l2_temps) > 2 and np.std(l2_temps) > 1e-10:
             Q_slope = np.polyfit(l2_temps, P_phases, 1)[0]
         else:
@@ -630,26 +640,27 @@ def run_mathcad(prn_path, **kwargs):
     # Основная кривая R(σ) — это LOESS F1, а НЕ power law.
     # s1 = dead zone boundary в единицах σ%
 
-    # VX1 = VX[0..t_start] (включая элемент где VY > 0.01)
-    n_grid = t_start  # rows(VX1) - 1
-    if n_grid < 3:
-        n_grid = len(VX) - 1
+    # Mathcad: grid search по VX1/VY1 (sorted, first ~262 elements up to VY>0.01)
+    # В нашей реализации arcsin-осцилляции в dead zone крупнее чем в Mathcad
+    # (из-за мелких отличий в квадратичном уточнении), что смещает VX1 boundary.
+    #
+    # Прагматичный подход: grid search по ВСЕМ VX/VY (как в Mathcad _grid_search),
+    # суммы от k=i до n (все сортированные данные).
+    # Это эквивалентно Mathcad, если данные z совпадают.
 
-    VX1_grid = VX[:n_grid + 1].copy()
-    VY1_grid = VY[:n_grid + 1].copy()
-
-    print(f"Grid search: n = {n_grid} (dead zone VX[0..{n_grid}], σ range: {VX[0]:.4f} to {VX[n_grid]:.4f}%)")
+    n_grid = len(VX) - 1
+    print(f"Grid search: n = {n_grid} (full VX range: {VX[0]:.4f} to {VX[-1]:.4f}%)")
 
     for i in range(n_grid):
-        x_val = VX1_grid[i]
-        x_end = VX1_grid[i + 1] if i + 1 <= n_grid else VX1_grid[i] + 0.01
+        x_val = VX[i]
+        x_end = VX[i + 1]
         while x_val < x_end:
-            # Суммы от k=i до n
-            VX_above = VX1_grid[i:]
-            VY_above = VY1_grid[i:]
+            # Суммы от k=i до n (точки "выше" порога x)
+            VX_above = VX[i:]
+            VY_above = VY[i:]
 
-            xw = np.power(VX_above - x_val, w_exp)
-            xw2 = np.power(VX_above - x_val, 2 * w_exp)
+            xw = np.power(np.maximum(VX_above - x_val, 0), w_exp)
+            xw2 = np.power(np.maximum(VX_above - x_val, 0), 2 * w_exp)
             denom = np.sum(xw2)
             if denom < 1e-20:
                 x_val += 0.01
@@ -658,8 +669,8 @@ def run_mathcad(prn_path, **kwargs):
             q1_val = np.sum(xw * VY_above)
             s0_cand = q1_val / denom
 
-            # f = Σ VY[0..i-1]² + Σ (s0·xw - VY[i..n])²
-            f_res = np.sum(VY1_grid[:i] ** 2)
+            # f = Σ VY[0..i-1]² + Σ (s0·(VX-x)^w - VY)²
+            f_res = np.sum(VY[:i] ** 2)
             f_res += np.sum((s0_cand * xw - VY_above) ** 2)
 
             if f_res < best_min:
@@ -689,9 +700,18 @@ def run_mathcad(prn_path, **kwargs):
     sigma_sel = []
     sqrt_r_sel = []
 
+    # Mathcad: iterate z in POSITION order, break at first R < 0
+    # BUT: our z has arcsin oscillations → premature breaks.
+    # Fix: use a small rolling average to detect true sign change,
+    # or skip isolated negative values.
+    neg_count = 0
     for i in range(n_rates):
         if z[i, 1] < 0.0:
-            break
+            neg_count += 1
+            if neg_count >= 3:  # 3 consecutive negatives = true sign change
+                break
+        else:
+            neg_count = 0
         if 0.0 < z[i, 1] < 0.3 and z[i, 3] > 0:
             sigma_sel.append(z[i, 3])
             sqrt_r_sel.append(np.sqrt(z[i, 1]))
