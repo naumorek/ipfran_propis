@@ -474,25 +474,72 @@ def run_mathcad(prn_path, **kwargs):
 
     L1 = -Q_slope / (np.pi * co1) if abs(co1) > 1e-20 else 0.0
 
-    # Mathcad: x0 = co0 - co1 * (a[m-1, 4] - 273.15)
-    x0 = co0 - co1 * float(a[m - 1, 4] - 273.15)
+    # Mathcad (скриншот hires/1.jpg): x0 = co0 - co1·y[0,3]
+    # (НЕ a[m-1,4]! Используется T при начальной позиции)
+    x0 = co0 - co1 * y[0, 3]
 
-    # Mathcad: L0 := L1 · (co0 - co1·y[0,3]) / x0 · (y[u,2] - y[0,2]) / (π·x0)
-    # (для информации, L0 пересчитывается)
-    L0_calc = L1  # упрощённо, L0 не влияет на zs-формулу
+    # L0: Mathcad: L0 := L1·(co0-co1·y[u,3])/x0 - (y[u,2]-y[0,2])/(π·x0)
+    x_at_u = co0 - co1 * y[u_didx, 3]
+    L0_calc = L1 * x_at_u / x0 - (y[u_didx, 2] - y[0, 2]) / (np.pi * x0)
 
     print(f"Q_slope = {Q_slope:.6f}")
     print(f"L1 = {L1:.2f}")
-    print(f"x0 = {x0:.8f} (при T[m-1] = {float(a[m-1,4]-273.15):.2f}°C)")
+    print(f"x0 = {x0:.8f} (при T[0] = {y[0,3]:.2f}°C)")
+    print(f"L0 = {L0_calc:.2f}")
 
     # ========================================================================
-    #  11) zs — ФОРМУЛА СКОРОСТИ (КЛЮЧЕВАЯ)
+    #  11) L — КУМУЛЯТИВНАЯ ТОЛЩИНА ИЗ ФАЗЫ
     # ========================================================================
-    # Mathcad: zs (скриншот 29)
-    # z[i,0] = (ys[i,0] + ys[i+1,0]) / 2          — средняя позиция
-    # z[i,1] = [L1·x0·(1/x2-1/x1) + 1/π·(φ2/x2-φ1/x1)] · 30 / (d·ww)  — скорость (мкм/мин)
-    # z[i,2] = 0.5·(T[y1] + T[y2]) - 273.15        — средняя температура
-    # z[i,3] = σ% (пересыщение)
+    # Mathcad (скриншот hires/1.jpg):
+    # L[i] = (y[i,2]/(π·x) + L0·x0/x - L0)·nn
+    # где x = co0 - co1·y[i,3]
+
+    L_arr = np.zeros(g + 1)
+    for i in range(g + 1):
+        x_i = co0 - co1 * y[i, 3]
+        if abs(x_i) < 1e-15:
+            x_i = 1e-15
+        L_arr[i] = (y[i, 2] / (np.pi * x_i) + L0_calc * x0 / x_i - L0_calc) * nn
+
+    print(f"L range: {L_arr.min():.2f} to {L_arr.max():.2f}")
+
+    # ========================================================================
+    #  11b) LOESS СГЛАЖИВАНИЕ L(t) → Fy → T[i]
+    # ========================================================================
+    # Mathcad: ta[w] := Tau(y[w,0]) — время для каждой d-step позиции
+    # Sy := loess(ta, L, span1)
+    # Fy(x) := interp(Sy, ta, L, x) — сглаженная L
+    # T[i] := Fy(ta[i]) — сглаженная L при каждом времени
+
+    # Tau(x) = linterp(tau, a1, x) — время из PRN столбца.
+    # В PRN каждый отсчёт ≈ 1 секунда (dtau = 0.055 мин = 3.3 сек, но
+    # шаг индексации = 1 сек). Tau возвращает СЕКУНДЫ, не минуты.
+    # Для d-step позиций: Tau(pos) ≈ pos (каждая позиция ≈ 1 секунда).
+    # Множитель 30 в формуле z конвертирует: (fringes/sec) × 30 → мкм/мин.
+    ta_arr = y[:g + 1, 0]  # позиция ≈ время в секундах (1 отсчёт ≈ 1 сек)
+
+    try:
+        from statsmodels.nonparametric.smoothers_lowess import lowess as lowess_func
+        # LOESS сглаживание L(ta)
+        loess_result = lowess_func(L_arr, ta_arr, frac=span1, return_sorted=False)
+        T_smooth = loess_result  # сглаженная L при тех же ta
+    except ImportError:
+        # Fallback: Savitzky-Golay
+        from scipy.signal import savgol_filter
+        win = max(51, int(len(L_arr) * span1))
+        if win % 2 == 0:
+            win += 1
+        T_smooth = savgol_filter(L_arr, win, polyorder=2)
+
+    print(f"T_smooth (LOESS L) range: {T_smooth.min():.2f} to {T_smooth.max():.2f}")
+
+    # ========================================================================
+    #  11c) z — СКОРОСТЬ = dL_smooth/dt × 30 × nn
+    # ========================================================================
+    # Mathcad (скриншот hires/1.jpg):
+    # z[i,1] = (T[i+1] - T[i]) / (Tau(y[i+1,0]) - Tau(y[i,0])) · 30·nn
+    # T[i] = LOESS-smoothed L at time ta[i]
+    # 30·nn = конверсионный множитель
 
     n_rates = g  # g+1 позиций → g интервалов
     z = np.zeros((n_rates, 4))
@@ -501,27 +548,22 @@ def run_mathcad(prn_path, **kwargs):
         # Средняя позиция
         z[i, 0] = (y[i, 0] + y[i + 1, 0]) / 2.0
 
-        # Целые индексы для lookup температуры
-        y1 = int(np.ceil(y[i, 0]))
-        y2 = int(np.floor(y[i + 1, 0]))
-        y1 = max(0, min(y1, m - 1))
-        y2 = max(0, min(y2, m - 1))
+        # Средняя температура (для σ%)
+        y1_idx = int(np.ceil(y[i, 0]))
+        y2_idx = int(np.floor(y[i + 1, 0]))
+        y1_idx = max(0, min(y1_idx, m - 1))
+        y2_idx = max(0, min(y2_idx, m - 1))
+        if y2_idx >= y1_idx:
+            z[i, 2] = float(np.mean(a[y1_idx:y2_idx + 1, 4] - 273.15))
+        else:
+            z[i, 2] = 0.5 * (float(a[y1_idx, 4] - 273.15) + float(a[y2_idx, 4] - 273.15))
 
-        # Средняя температура
-        z[i, 2] = 0.5 * (float(a[y1, 4] - 273.15) + float(a[y2, 4] - 273.15))
-
-        # Оптические коэффициенты при T1 и T2
-        x1 = co0 - co1 * y[i, 3]       # при температуре позиции i
-        x2 = co0 - co1 * y[i + 1, 3]   # при температуре позиции i+1
-
-        if abs(x1) < 1e-15 or abs(x2) < 1e-15:
+        # Скорость: dL_smooth/dt × 30 × nn
+        dt_tau = ta_arr[i + 1] - ta_arr[i]  # разность времён (мин)
+        if abs(dt_tau) < 1e-15:
             z[i, 1] = 0.0
             continue
-
-        # Mathcad zs формула
-        refractive_corr = L1 * x0 * (1.0 / x2 - 1.0 / x1)
-        phase_term = (1.0 / np.pi) * (y[i + 1, 2] / x2 - y[i, 2] / x1)
-        z[i, 1] = (refractive_corr + phase_term) * 30.0 / (d * ww)
+        z[i, 1] = (T_smooth[i + 1] - T_smooth[i]) / dt_tau * 30.0 * nn
 
     # Пересыщение σ%: Sigm_i = 100 * ln(Cn / Cm_i)
     # Cn = C(tn), Cm_i = C(T_i)
