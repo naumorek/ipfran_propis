@@ -331,6 +331,17 @@ def run_mathcad(prn_path, **kwargs):
     print(f"  es[0] = ({es[0,0]:.2f}, {es[0,1]:.4f})")
     print(f"  es[-1] = ({es[-1,0]:.2f}, {es[-1,1]:.4f})")
 
+    # Mathcad (hires скриншот 13): фаза y использует `e` (integer positions),
+    # а НЕ `es` (polyfit refined). e[j,0] = позиция max |S1-y0| в zero-crossing
+    # интервале, e[j,1] = значение S1 в этой позиции.
+    # Для фазовой функции используем `e` (= extrs после фильтрации, integer).
+    # `es` (polyfit refined) используется только для визуализации.
+    #
+    # Формат e: e[j,0] = position (int), e[j,1] = S1 value
+    e_for_phase = np.column_stack([extrs[:, 0].astype(float), extrs[:, 1]])
+    print(f"e (для фазы, int pos): {len(e_for_phase)} шт, pos[0]={e_for_phase[0,0]:.0f}, val={e_for_phase[0,1]:.4f}")
+    print(f"  e[-1]: pos={e_for_phase[-1,0]:.0f}, val={e_for_phase[-1,1]:.4f}")
+
     # ========================================================================
     #  8) es1 — РАСПРЕДЕЛЕНИЕ ЭКСТРЕМУМОВ НА СИГНАЛЬНУЮ СЕТКУ
     # ========================================================================
@@ -359,7 +370,7 @@ def run_mathcad(prn_path, **kwargs):
     g = int(np.floor(isat1 / d))
     print(f"d-step grid: g = {g} points")
 
-    p_ext = len(es) - 1  # число интервалов между экстремумами
+    p_ext = len(e_for_phase) - 1  # число интервалов между экстремумами
 
     # Массив y: (g+1) строк × 4 столбца [позиция, сигнал, фаза, температура]
     y = np.zeros((g + 1, 4))
@@ -372,35 +383,36 @@ def run_mathcad(prn_path, **kwargs):
         y[i, 3] = float(t_func(y[i, 0]))        # интерполированная температура
 
         # Найти между какими экстремумами лежит позиция
+        # Используем e_for_phase (integer positions), НЕ es (polyfit refined)
+        e = e_for_phase  # alias
         n_idx = p_ext + 1  # default: после всех
-        for j_idx in range(len(es)):
-            if es[j_idx, 0] > y[i, 0]:
+        for j_idx in range(len(e)):
+            if e[j_idx, 0] > y[i, 0]:
                 n_idx = j_idx
                 break
 
         if n_idx < 1:
             # Случай 1: ДО первого экстремума
-            denom = es[1, 1] - es[0, 1]
+            denom = e[1, 1] - e[0, 1]
             if abs(denom) > 1e-15:
-                arg = np.clip((y[i, 1] - es[0, 1]) / denom, -1.0, 1.0)
+                arg = np.clip((y[i, 1] - e[0, 1]) / denom, -1.0, 1.0)
                 y[i, 2] = -np.arcsin(arg)
             else:
                 y[i, 2] = 0.0
         elif n_idx <= p_ext:
             # Случай 2: МЕЖДУ экстремумами n_idx-1 и n_idx
-            denom = es[n_idx, 1] - es[n_idx - 1, 1]
+            denom = e[n_idx, 1] - e[n_idx - 1, 1]
             if abs(denom) > 1e-15:
-                arg = np.clip((y[i, 1] - es[n_idx - 1, 1]) / denom, -1.0, 1.0)
+                arg = np.clip((y[i, 1] - e[n_idx - 1, 1]) / denom, -1.0, 1.0)
                 y[i, 2] = (np.pi / 2.0) * (n_idx - 1) + np.arcsin(arg)
             else:
                 y[i, 2] = (np.pi / 2.0) * (n_idx - 1)
         else:
             # Случай 3: ПОСЛЕ последнего экстремума
-            # Mathcad: phase = (π/2)*n + arcsin((signal - e[p]) / (e[p-1] - e[p]))
             s_last = i
-            denom = es[p_ext - 1, 1] - es[p_ext, 1]
+            denom = e[p_ext - 1, 1] - e[p_ext, 1]
             if abs(denom) > 1e-15:
-                arg = np.clip((y[i, 1] - es[p_ext, 1]) / denom, -1.0, 1.0)
+                arg = np.clip((y[i, 1] - e[p_ext, 1]) / denom, -1.0, 1.0)
                 y[i, 2] = (np.pi / 2.0) * p_ext + np.arcsin(arg)
             else:
                 y[i, 2] = (np.pi / 2.0) * p_ext
@@ -518,10 +530,14 @@ def run_mathcad(prn_path, **kwargs):
     # Множитель 30 в формуле z конвертирует: (fringes/sec) × 30 → мкм/мин.
     ta_arr = y[:g + 1, 0]  # позиция ≈ время в секундах (1 отсчёт ≈ 1 сек)
 
+    # Mathcad: Sy := loess(ta, L, span1) where span1 = 0.15 at this point
+    # (span1 is later redefined to 0.2 for R(σ) LOESS on page 3)
+    span_L = 0.15  # для L сглаживания (как в Mathcad page 1)
+
     try:
         from statsmodels.nonparametric.smoothers_lowess import lowess as lowess_func
-        # LOESS сглаживание L(ta)
-        loess_result = lowess_func(L_arr, ta_arr, frac=span1, return_sorted=False)
+        # LOESS сглаживание L(ta) с span = 0.15
+        loess_result = lowess_func(L_arr, ta_arr, frac=span_L, return_sorted=False)
         T_smooth = loess_result  # сглаженная L при тех же ta
     except ImportError:
         # Fallback: Savitzky-Golay
