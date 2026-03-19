@@ -758,18 +758,21 @@ def run_mathcad(prn_path, **kwargs):
     sigma_sel = []
     sqrt_r_sel = []
 
-    # Mathcad: iterate z in POSITION order, collect points with 0 < R < 0.3 and σ > 0
-    # break at first R < 0 (= transition to dissolution/dead zone)
+    # Mathcad (скриншот hires/18.jpg):
+    # Q := for i ∈ 0..rows(z)-1:
+    #   break if z[i,1] < 0.0
+    #   q[j,0] ← z[i,3] if z[i,1] < 0.3
+    #   q[j,1] ← √(z[i,1]) if z[i,1] < 0.3
+    #   j ← j+1 if z[i,1] < 0.3
     #
-    # Используем F1 (LOESS) для s2 вместо raw z, чтобы компенсировать arcsin-шум.
-    # В Mathcad raw z гладкий, поэтому raw и LOESS дают одинаковый s2.
-    # У нас raw z шумный → LOESS-smoothed данные ближе к Mathcad.
-    sigma_grid_s2 = np.linspace(0.01, float(VX[-1]), 500)
-    for sigma_val in sigma_grid_s2:
-        f1_val = float(F1_func(sigma_val))
-        if 0.0 < f1_val < 0.3:
-            sigma_sel.append(sigma_val)
-            sqrt_r_sel.append(np.sqrt(f1_val))
+    # z iterate in POSITION order (not sorted!). z[i,1] = dL_smooth/dt × 30·nn
+    # is SMOOTH (LOESS of L before differentiation), so break at first R < 0 works.
+    for i in range(n_rates):
+        if z[i, 1] < 0.0:
+            break
+        if 0.0 < z[i, 1] < 0.3 and z[i, 3] > 0:
+            sigma_sel.append(z[i, 3])
+            sqrt_r_sel.append(np.sqrt(z[i, 1]))
 
     if len(sigma_sel) >= 3:
         sigma_arr = np.array(sigma_sel)
