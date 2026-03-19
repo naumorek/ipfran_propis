@@ -648,16 +648,22 @@ def run_mathcad(prn_path, **kwargs):
     # суммы от k=i до n (все сортированные данные).
     # Это эквивалентно Mathcad, если данные z совпадают.
 
-    n_grid = len(VX) - 1
-    print(f"Grid search: n = {n_grid} (full VX range: {VX[0]:.4f} to {VX[-1]:.4f}%)")
+    # Grid search по VX1/VY1 (обрезанные, σ > dead zone boundary)
+    # Используем VY1_smooth (LOESS-сглаженные) для стабильного фита
+    # Mathcad использует raw VY1, но в Mathcad R-данные гладкие по arcsin.
+    # Наши R шумнее → LOESS-сглаживание компенсирует.
+    VY1_smooth = np.array([float(F1_func(x)) for x in VX1])
+    VY1_smooth = np.maximum(VY1_smooth, 0.0)  # F1 может быть < 0 в dead zone
+
+    n_grid = len(VX1) - 1
+    print(f"Grid search: n = {n_grid} (VX1 range: {VX1[0]:.4f} to {VX1[-1]:.4f}%)")
 
     for i in range(n_grid):
-        x_val = VX[i]
-        x_end = VX[i + 1]
+        x_val = VX1[i]
+        x_end = VX1[i + 1]
         while x_val < x_end:
-            # Суммы от k=i до n (точки "выше" порога x)
-            VX_above = VX[i:]
-            VY_above = VY[i:]
+            VX_above = VX1[i:]
+            VY_above = VY1_smooth[i:]
 
             xw = np.power(np.maximum(VX_above - x_val, 0), w_exp)
             xw2 = np.power(np.maximum(VX_above - x_val, 0), 2 * w_exp)
@@ -669,8 +675,7 @@ def run_mathcad(prn_path, **kwargs):
             q1_val = np.sum(xw * VY_above)
             s0_cand = q1_val / denom
 
-            # f = Σ VY[0..i-1]² + Σ (s0·(VX-x)^w - VY)²
-            f_res = np.sum(VY[:i] ** 2)
+            f_res = np.sum(VY1_smooth[:i] ** 2)
             f_res += np.sum((s0_cand * xw - VY_above) ** 2)
 
             if f_res < best_min:
@@ -700,21 +705,18 @@ def run_mathcad(prn_path, **kwargs):
     sigma_sel = []
     sqrt_r_sel = []
 
-    # Mathcad: iterate z in POSITION order, break at first R < 0
-    # BUT: our z has arcsin oscillations → premature breaks.
-    # Fix: use a small rolling average to detect true sign change,
-    # or skip isolated negative values.
-    neg_count = 0
-    for i in range(n_rates):
-        if z[i, 1] < 0.0:
-            neg_count += 1
-            if neg_count >= 3:  # 3 consecutive negatives = true sign change
-                break
-        else:
-            neg_count = 0
-        if 0.0 < z[i, 1] < 0.3 and z[i, 3] > 0:
-            sigma_sel.append(z[i, 3])
-            sqrt_r_sel.append(np.sqrt(z[i, 1]))
+    # Mathcad: iterate z in POSITION order, collect points with 0 < R < 0.3 and σ > 0
+    # break at first R < 0 (= transition to dissolution/dead zone)
+    #
+    # Используем F1 (LOESS) для s2 вместо raw z, чтобы компенсировать arcsin-шум.
+    # В Mathcad raw z гладкий, поэтому raw и LOESS дают одинаковый s2.
+    # У нас raw z шумный → LOESS-smoothed данные ближе к Mathcad.
+    sigma_grid_s2 = np.linspace(0.01, float(VX[-1]), 500)
+    for sigma_val in sigma_grid_s2:
+        f1_val = float(F1_func(sigma_val))
+        if 0.0 < f1_val < 0.3:
+            sigma_sel.append(sigma_val)
+            sqrt_r_sel.append(np.sqrt(f1_val))
 
     if len(sigma_sel) >= 3:
         sigma_arr = np.array(sigma_sel)
