@@ -530,22 +530,28 @@ def run_mathcad(prn_path, **kwargs):
     # Множитель 30 в формуле z конвертирует: (fringes/sec) × 30 → мкм/мин.
     ta_arr = y[:g + 1, 0]  # позиция ≈ время в секундах (1 отсчёт ≈ 1 сек)
 
-    # Mathcad: Sy := loess(ta, L, span1) where span1 = 0.15 at this point
-    # (span1 is later redefined to 0.2 for R(σ) LOESS on page 3)
-    span_L = 0.15  # для L сглаживания (как в Mathcad page 1)
+    # Mathcad 2000 loess() uses LOCAL QUADRATIC (degree=2), NOT linear.
+    # This is critical: degree=2 gives s2=0.34 (matches Mathcad 0.32),
+    # while degree=1 gives s2=0.21 (wrong).
+    # span1 = 0.15 for L smoothing (from Mathcad page 1, before redefinition to 0.2).
+    span_L = 0.15
 
     try:
-        from statsmodels.nonparametric.smoothers_lowess import lowess as lowess_func
-        # LOESS сглаживание L(ta) с span = 0.15
-        loess_result = lowess_func(L_arr, ta_arr, frac=span_L, return_sorted=False)
-        T_smooth = loess_result  # сглаженная L при тех же ta
+        from skmisc.loess import loess as skmisc_loess
+        lo = skmisc_loess(ta_arr, L_arr, span=span_L, degree=2)
+        lo.fit()
+        T_smooth = lo.outputs.fitted_values
     except ImportError:
-        # Fallback: Savitzky-Golay
-        from scipy.signal import savgol_filter
-        win = max(51, int(len(L_arr) * span1))
-        if win % 2 == 0:
-            win += 1
-        T_smooth = savgol_filter(L_arr, win, polyorder=2)
+        try:
+            from statsmodels.nonparametric.smoothers_lowess import lowess as lowess_func
+            loess_result = lowess_func(L_arr, ta_arr, frac=span_L, return_sorted=False)
+            T_smooth = loess_result
+        except ImportError:
+            from scipy.signal import savgol_filter
+            win = max(51, int(len(L_arr) * span_L))
+            if win % 2 == 0:
+                win += 1
+            T_smooth = savgol_filter(L_arr, win, polyorder=2)
 
     print(f"T_smooth (LOESS L) range: {T_smooth.min():.2f} to {T_smooth.max():.2f}")
 
@@ -608,20 +614,26 @@ def run_mathcad(prn_path, **kwargs):
     VX = u_sorted[:, 3].copy()  # σ%
     VY = u_sorted[:, 1].copy()  # R (мкм/мин)
 
-    # LOESS сглаживание
+    # LOESS сглаживание R(σ) — Mathcad degree=2, span1=0.2 (page 3)
     try:
-        from statsmodels.nonparametric.smoothers_lowess import lowess
-        result = lowess(VY, VX, frac=span1, return_sorted=True)
-        VX_smooth = result[:, 0]
-        VY_smooth = result[:, 1]
+        from skmisc.loess import loess as skmisc_loess
+        lo = skmisc_loess(VX, VY, span=span1, degree=2)
+        lo.fit()
+        VX_smooth = VX.copy()
+        VY_smooth = lo.outputs.fitted_values
     except ImportError:
-        # Fallback: простое скользящее среднее
-        window = max(3, int(len(VX) * span1))
-        if window % 2 == 0:
-            window += 1
-        kernel = np.ones(window) / window
-        VY_smooth = np.convolve(VY, kernel, mode='same')
-        VX_smooth = VX
+        try:
+            from statsmodels.nonparametric.smoothers_lowess import lowess
+            result = lowess(VY, VX, frac=span1, return_sorted=True)
+            VX_smooth = result[:, 0]
+            VY_smooth = result[:, 1]
+        except ImportError:
+            window = max(3, int(len(VX) * span1))
+            if window % 2 == 0:
+                window += 1
+            kernel = np.ones(window) / window
+            VY_smooth = np.convolve(VY, kernel, mode='same')
+            VX_smooth = VX
 
     # F1(x) — интерполяция LOESS результата
     F1_func = interp1d(VX_smooth, VY_smooth, kind='linear',
@@ -634,9 +646,10 @@ def run_mathcad(prn_path, **kwargs):
     # VX1 используется для Sig035, G_h, s2 (Q regression)
     # Grid search (s) использует ПОЛНЫЕ VX/VY, НЕ обрезанные VX1!
 
+    # VX1/VY1: обрезка по RAW VY (не сглаженным!), как в Mathcad
     t_start = 0
-    for k_idx in range(len(VX)):
-        if VY_smooth[k_idx] > 0.01:
+    for k_idx in range(len(VY)):
+        if VY[k_idx] > 0.01:
             t_start = k_idx
             break
 
