@@ -1201,12 +1201,20 @@ def run_mathcad(prn_path, **kwargs):
         'z': z,                # rate data (n_rates × 4)
         'y': y,                # phase grid (g+1 × 4)
         'es': es,              # refined extrema
+        'e': e_for_phase,      # extrema used for phase (integer positions)
         'VX': VX, 'VY': VY,   # sorted σ%, R
         'F1': F1_func,         # LOESS function
         'Si': Si, 'Si1': Si1, # reference curves
         'H': H,                # dead zone table
         'te': te, 'tn': tn, 'Td': Td, 'Sigm': Sigm,
         's0': best_s0, 's1': best_s1, 's2': s2, 'Sig035': Sig035,
+        # Промежуточные данные для аналитики
+        'signal_raw': signal_raw, 'S1': S1,
+        'y0': y0, 'y0s': y0s,
+        'L_arr': L_arr, 'T_smooth': T_smooth, 'ta_arr': ta_arr,
+        'im1': im1, 'im': im, 'isat': isat, 'isat1': isat1,
+        'm': m, 'nn': nn, 'co0': co0, 'co1': co1,
+        'co2': co2, 'co3': co3, 'co4': co4,
     }
 
 
