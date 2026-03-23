@@ -41,6 +41,8 @@ ww = 1          # весовой коэффициент
 L0 = 1500       # базовое число полос
 span = 0.5      # LOESS span для s1/dissolution
 span1 = 0.2     # LOESS span для Sig035 и F1
+smooth_window = 5  # окно medsmooth (5 для 020326, 1 для 030226)
+z_split_index = None  # J1/J2 разбиение z (индекс строки, None=отключено)
 
 # --- Ручной tn (если задан оператором) ---
 tn_manual = None  # None = вычислить по формуле
@@ -50,13 +52,31 @@ tn_manual = None  # None = вычислить по формуле
 #  1) ЗАГРУЗКА PRN И ИЗВЛЕЧЕНИЕ SUB-ARRAY
 # ============================================================================
 
+def _parse_time_to_seconds(time_strings):
+    """HH:MM:SS → секунды от начала (из prn_reader.py)."""
+    seconds = np.zeros(len(time_strings), dtype=np.float64)
+    for i, ts in enumerate(time_strings):
+        parts = ts.split(":")
+        if len(parts) == 3:
+            h, m_t, s = int(parts[0]), int(parts[1]), int(parts[2])
+            seconds[i] = h * 3600 + m_t * 60 + s
+    # Midnight crossing
+    for i in range(1, len(seconds)):
+        if seconds[i] < seconds[i - 1]:
+            seconds[i:] += 86400
+            break
+    seconds -= seconds[0]
+    return seconds
+
+
 def load_prn(filepath):
     """
-    Читает PRN файл → матрица (N, 6).
+    Читает PRN файл → (матрица (N, 6), time_seconds (N,)).
     Столбцы: 0=index, 1=LED1, 2=LED2, 3=flag, 4=T_raw(~273+T), 5=T_C
-    Столбец 6 (время HH:MM:SS) пропускается.
+    time_seconds: секунды от начала записи (из столбца 6 HH:MM:SS).
     """
     data = []
+    time_strings = []
     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
             parts = line.strip().split()
@@ -65,9 +85,14 @@ def load_prn(filepath):
             try:
                 row = [float(parts[i]) for i in range(6)]
                 data.append(row)
+                if len(parts) >= 7:
+                    time_strings.append(parts[6])
+                else:
+                    time_strings.append("00:00:00")
             except (ValueError, IndexError):
                 continue
-    return np.array(data)
+    time_seconds = _parse_time_to_seconds(time_strings) if time_strings else np.arange(len(data), dtype=np.float64)
+    return np.array(data), time_seconds
 
 
 def run_mathcad(prn_path, **kwargs):
@@ -78,6 +103,7 @@ def run_mathcad(prn_path, **kwargs):
     """
     global n1, n2, vq, k1, dtau, im1, isat1, im, isat
     global Salt, Acid, Face, d, ww, L0, span, span1, l, tn_manual
+    global smooth_window, z_split_index, vt1, vt2
 
     # Переопределение параметров из kwargs
     for key, val in kwargs.items():
@@ -85,7 +111,7 @@ def run_mathcad(prn_path, **kwargs):
             globals()[key] = val
 
     # --- Чтение данных ---
-    raw = load_prn(prn_path)
+    raw, time_seconds_all = load_prn(prn_path)
     m_total = len(raw)
     print(f"Загружено {m_total} строк из {prn_path}")
 
@@ -109,13 +135,18 @@ def run_mathcad(prn_path, **kwargs):
     # Но в скриншоте 1: S1 := medsmooth(a⟨(9)⟩, 5)
     # a⟨(9)⟩ = столбец 9 после расширения (ratio), или столбец 1 (LED1)
     # Для ТОЧНОГО воспроизведения: используем LED1/LED2 как signal
-    led1 = a[:, 1].astype(np.float64)
-    led2 = a[:, 2].astype(np.float64)
+    # Mathcad: a[i,9] := (a[i,1] - vt1) / (a[i,2] - vt2)
+    led1 = a[:, 1].astype(np.float64) - vt1
+    led2 = a[:, 2].astype(np.float64) - vt2
     led2_safe = np.where(np.abs(led2) < 1e-10, 1e-10, led2)
     signal_raw = led1 / led2_safe
 
-    # Mathcad: S1 := medsmooth(signal, 5)
-    S1 = medfilt(signal_raw, kernel_size=5)
+    # Mathcad: S1 := medsmooth(a⟨9⟩, smooth_window)
+    # smooth_window=5 для 020326, smooth_window=1 для 030226
+    if smooth_window > 1:
+        S1 = medfilt(signal_raw, kernel_size=smooth_window)
+    else:
+        S1 = signal_raw.copy()
 
     # Mathcad: y0 := (1/im1) * Σ S1[i] для i=0..im1-1  (среднее в зоне роста)
     y0 = float(np.mean(S1[:im1]))
@@ -189,53 +220,94 @@ def run_mathcad(prn_path, **kwargs):
     # for i ∈ 0, 2..im1:
     #   k=sign(S1[0]-y0), отслеживать max |S1-y0| между нулевыми пересечениями
 
-    def find_extrema_zc(S1, baseline, start, end):
-        """Zero-crossing step=2 extrema detection — exact Mathcad."""
+    # ---- Mathcad two-phase extrema detection ----
+
+    def find_zero_crossings_f(S1, baseline, start, end):
+        """
+        Mathcad function f: zero-crossing detection with step=2.
+        Returns array of positions where signal crosses baseline.
+        """
         if start >= end or start >= len(S1):
-            return np.empty((0, 2))
+            return np.array([], dtype=int)
 
         start = max(0, start)
         end = min(end, len(S1) - 1)
 
-        # Начальный знак
         k = 1 if (S1[start] - baseline) > 0 else -1
-
-        ma = -10    # позиция текущего максимума отклонения
-        mb = -10.0  # значение текущего максимума отклонения
-        j = 0
-
-        positions = []
-        values = []
+        crossings = []
 
         i = start
         while i <= end:
-            deviation = abs(S1[i] - baseline)
-
-            if deviation > mb:
-                ma = i
-                mb = deviation
-
-            # Нулевое пересечение (смена знака)
             if (S1[i] - baseline) * k < 0:
-                positions.append(ma)
-                values.append(S1[ma])
-                mb = -1.0
+                crossings.append(i)
                 k = -k
+            i += 2
 
-            i += 2  # шаг = 2
+        return np.array(crossings, dtype=int)
 
-        # Последний экстремум если далеко от конца
-        if ma >= 0 and (end - ma) > 4 and (len(positions) == 0 or positions[-1] != ma):
-            positions.append(ma)
-            values.append(S1[ma])
+    def find_extrema_e(S1, baseline, f_crossings, start, end_im1):
+        """
+        Mathcad function e: find extrema within zero-crossing intervals.
+        For each interval between crossings, walks EVERY sample (step=1),
+        finds max |S1-baseline|, averages positions if multiple have same max value.
+        Filters by n1 > 4 (position sum > 4).
+        """
+        positions = []
+        values = []
+
+        # Build intervals: (start, f[0]), (f[0], f[1]), ..., (f[-1], end_im1)
+        intervals = []
+        if len(f_crossings) == 0:
+            intervals = [(start, end_im1)]
+        else:
+            intervals.append((start, int(f_crossings[0])))
+            for p in range(len(f_crossings) - 1):
+                intervals.append((int(f_crossings[p]), int(f_crossings[p + 1])))
+            intervals.append((int(f_crossings[-1]), end_im1))
+
+        for lo, hi in intervals:
+            if hi <= lo:
+                continue
+
+            # Find max |S1[i] - baseline| in interval [lo, hi] — step=1
+            max_dev = -1.0
+            best_val = 0.0
+            for i in range(lo, min(hi + 1, len(S1))):
+                dev = abs(S1[i] - baseline)
+                if dev > max_dev:
+                    max_dev = dev
+                    best_val = S1[i]
+
+            if max_dev < 0:
+                continue
+
+            # Average positions where S1[i] == best_val (exact match)
+            n1_sum = 0
+            k_count = 0
+            for i in range(lo, min(hi + 1, len(S1))):
+                if S1[i] == best_val:
+                    n1_sum += i
+                    k_count += 1
+
+            if k_count == 0:
+                continue
+
+            avg_pos = n1_sum / k_count
+
+            # Mathcad filter: e[j,0] ← n1/k if n1 > 4
+            if n1_sum > 4:
+                positions.append(avg_pos)
+                values.append(best_val)
 
         if len(positions) == 0:
             return np.empty((0, 2))
 
         return np.column_stack([positions, values])
 
-    # Экстремумы в зоне роста
-    extrs_raw = find_extrema_zc(S1, y0, 0, im1)
+    # Phase 1: zero-crossings
+    f_crossings = find_zero_crossings_f(S1, y0, 0, im1)
+    # Phase 2: extrema within intervals
+    extrs_raw = find_extrema_e(S1, y0, f_crossings, 0, im1)
     h_ext = len(extrs_raw)
     print(f"Экстремумов (raw): {h_ext}")
 
@@ -331,16 +403,12 @@ def run_mathcad(prn_path, **kwargs):
     print(f"  es[0] = ({es[0,0]:.2f}, {es[0,1]:.4f})")
     print(f"  es[-1] = ({es[-1,0]:.2f}, {es[-1,1]:.4f})")
 
-    # Mathcad (hires скриншот 13): фаза y использует `e` (integer positions),
-    # а НЕ `es` (polyfit refined). e[j,0] = позиция max |S1-y0| в zero-crossing
-    # интервале, e[j,1] = значение S1 в этой позиции.
-    # Для фазовой функции используем `e` (= extrs после фильтрации, integer).
-    # `es` (polyfit refined) используется только для визуализации.
-    #
-    # Формат e: e[j,0] = position (int), e[j,1] = S1 value
-    e_for_phase = np.column_stack([extrs[:, 0].astype(float), extrs[:, 1]])
-    print(f"e (для фазы, int pos): {len(e_for_phase)} шт, pos[0]={e_for_phase[0,0]:.0f}, val={e_for_phase[0,1]:.4f}")
-    print(f"  e[-1]: pos={e_for_phase[-1,0]:.0f}, val={e_for_phase[-1,1]:.4f}")
+    # Mathcad: фаза y использует `e` — экстремумы из find_extrema_e.
+    # e[j,0] = позиция (может быть дробной если n1/k усреднение), e[j,1] = S1 value.
+    # extrs (после фильтрации краёв) = e_for_phase.
+    e_for_phase = extrs.copy()
+    print(f"e (для фазы): {len(e_for_phase)} шт, pos[0]={e_for_phase[0,0]:.1f}, val={e_for_phase[0,1]:.4f}")
+    print(f"  e[-1]: pos={e_for_phase[-1,0]:.1f}, val={e_for_phase[-1,1]:.4f}")
 
     # ========================================================================
     #  8) es1 — РАСПРЕДЕЛЕНИЕ ЭКСТРЕМУМОВ НА СИГНАЛЬНУЮ СЕТКУ
@@ -523,12 +591,16 @@ def run_mathcad(prn_path, **kwargs):
     # Fy(x) := interp(Sy, ta, L, x) — сглаженная L
     # T[i] := Fy(ta[i]) — сглаженная L при каждом времени
 
-    # Tau(x) = linterp(tau, a1, x) — время из PRN столбца.
-    # В PRN каждый отсчёт ≈ 1 секунда (dtau = 0.055 мин = 3.3 сек, но
-    # шаг индексации = 1 сек). Tau возвращает СЕКУНДЫ, не минуты.
-    # Для d-step позиций: Tau(pos) ≈ pos (каждая позиция ≈ 1 секунда).
-    # Множитель 30 в формуле z конвертирует: (fringes/sec) × 30 → мкм/мин.
-    ta_arr = y[:g + 1, 0]  # позиция ≈ время в секундах (1 отсчёт ≈ 1 сек)
+    # Mathcad: Tau(x) := linterp(tau, a1, x) — реальное время из PRN
+    # tau = индексы 0..m-1, a1 = time_seconds для sub-array
+    time_sub = time_seconds_all[n1:n2 + 1]  # время для sub-array
+    if len(time_sub) == m:
+        Tau_func = interp1d(np.arange(m, dtype=np.float64), time_sub,
+                            kind='linear', fill_value='extrapolate', bounds_error=False)
+        ta_arr = np.array([float(Tau_func(y[i, 0])) for i in range(g + 1)])
+    else:
+        # Fallback: позиция ≈ время в секундах
+        ta_arr = y[:g + 1, 0]
 
     # Mathcad 2000 loess() uses LOCAL QUADRATIC (degree=2), NOT linear.
     # This is critical: degree=2 gives s2=0.34 (matches Mathcad 0.32),
@@ -597,6 +669,12 @@ def run_mathcad(prn_path, **kwargs):
             z[i, 3] = 100.0 * np.log(Cn / Cm_i)
         else:
             z[i, 3] = 0.0
+
+    # J1/J2 разбиение z (Mathcad: J1=submatrix(z,0,split,0,2), J2=submatrix(z,split+1,end,0,2))
+    # Файлоспецифичный индекс — удаляет переходную строку
+    if z_split_index is not None and 0 <= z_split_index < n_rates:
+        z = np.delete(z, z_split_index, axis=0)
+        n_rates = len(z)
 
     print(f"\nz (rates): {n_rates} точек")
     print(f"  z[0] = pos={z[0,0]:.1f}, R={z[0,1]:.6f} мкм/мин, T={z[0,2]:.2f}°C, σ={z[0,3]:.4f}%")
