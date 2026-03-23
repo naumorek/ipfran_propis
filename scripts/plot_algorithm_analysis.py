@@ -241,28 +241,35 @@ def main():
         F1_dT[idx] = float(F1(sigma))
     ax5.plot(dT_grid, 1.441 * F1_dT, color=C_SMOOTH, linewidth=2, label='F1 (LOESS)')
 
-    # Эталоны
-    ax5.plot(Si[:, 1], 1.441 * Si[:, 0], 'b-o', markersize=5, linewidth=1,
-             label=f'Si (эталон, CFe=0)')
-    ax5.plot(Si1[:, 1], 1.441 * Si1[:, 0], 'g-d', markersize=5, linewidth=1,
-             label=f'Si1 (эталон, CFe=16ppm)')
+    # Эталоны — показываем на ОТДЕЛЬНОЙ оси Y (масштаб другой!)
+    # Эталоны из Mathcad для динамической конвекции, наши данные — естественная.
+    # Поэтому абсолютные значения не сопоставимы, но ФОРМА кривой — да.
+    ax5r = ax5.twinx()
+    ax5r.plot(Si[:, 1], 1.441 * Si[:, 0], 'b--o', markersize=4, linewidth=0.8, alpha=0.4,
+              label=f'Si эталон CFe=0 (правая ось)')
+    ax5r.plot(Si1[:, 1], 1.441 * Si1[:, 0], 'r--d', markersize=4, linewidth=0.8, alpha=0.4,
+              label=f'Si1 эталон CFe=16ppm (правая ось)')
+    ax5r.set_ylabel('R эталон (мм/день)', fontsize=8, alpha=0.5)
+    ax5r.tick_params(axis='y', labelsize=7, colors='gray')
+    ax5r.legend(fontsize=6, loc='center right')
 
     ax5.set_xlabel('Переохлаждение dT (°C)')
     ax5.set_ylabel('R (мм/день)')
     ax5.set_title('5. ИТОГОВЫЙ ГРАФИК R(dT) — мм/день', fontsize=12, fontweight='bold')
-    ax5.set_xlim(0, 4)
-    ax5.set_ylim(-0.1, 4)
+    ax5.set_xlim(0, max(z_dT) * 1.05)
+    ax5.set_ylim(-0.1, max(1.441 * z[:, 1]) * 1.1)
     ax5.legend(fontsize=7, loc='upper left')
 
-    ax5.text(0.55, 0.02,
+    ax5.text(0.02, 0.72,
              f'te={te:.2f}°C  tn={tn:.2f}°C\n'
              f'Td={Td:.2f}°C  s2={r["s2"]:.2f}\n'
              f'Sig035={Sig035:.2f}%\n'
-             f'Эталоны Si/Si1: 8 точек каждый\n'
-             f'(полиномиальная аппроксимация)',
+             f'R max = {z[:,1].max()*1.441:.2f} мм/день\n'
+             f'Эталоны — другой масштаб\n'
+             f'(динамич. конвекция, правая ось)',
              transform=ax5.transAxes, fontsize=8, fontfamily='monospace',
              bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9),
-             verticalalignment='bottom')
+             verticalalignment='top')
 
     # ====== ОБЩИЙ ЗАГОЛОВОК ======
     fig.suptitle(
