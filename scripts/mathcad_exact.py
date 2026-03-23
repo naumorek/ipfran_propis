@@ -1167,32 +1167,76 @@ def run_mathcad(prn_path, **kwargs):
     # ========================================================================
     #  23) ГРАФИК R(σ%) — КАК В MATHCAD
     # ========================================================================
-    fig2, ax2 = plt.subplots(1, 1, figsize=(8, 5))
+    fig2, ax2 = plt.subplots(1, 1, figsize=(10, 6))
 
-    # Данные
-    ax2.plot(z[:, 3], z[:, 1], 'k.', markersize=1, alpha=0.3, label='z (data)')
+    K_conv = 1.441  # мкм/мин → мм/день
 
-    # LOESS
+    # Данные в мм/день
+    ax2.plot(z[:, 3], z[:, 1] * K_conv, 'k.', markersize=1, alpha=0.3, label=f'R ({n_rates} точек)')
+
+    # LOESS F1 в мм/день
     sigma_grid = np.linspace(max(0, VX[0]), VX[-1], 500)
     F1_sigma = np.array([float(F1_func(s_val)) for s_val in sigma_grid])
-    ax2.plot(sigma_grid, F1_sigma, 'r-', linewidth=1.5, label='F1 (LOESS)')
+    ax2.plot(sigma_grid, F1_sigma * K_conv, 'r-', linewidth=2, label='F1 (LOESS)')
 
-    # Power law fit
-    sigma_fit = np.linspace(max(best_s1, 0), VX[-1], 200)
-    R_fit = np.where(sigma_fit > best_s1,
-                      best_s0 * np.power(sigma_fit - best_s1, w_exp), 0.0)
-    ax2.plot(sigma_fit, R_fit, 'b--', linewidth=1, label=f'G = {best_s0:.4f}·(σ-({best_s1:.2f}))^{w_exp}')
+    # Порог Sig035
+    ax2.axhline(y=0.35 * K_conv, color='red', linewidth=0.8, linestyle='--', alpha=0.5)
+    ax2.axvline(x=Sig035, color='red', linewidth=0.8, linestyle=':', alpha=0.5)
+    ax2.text(Sig035 + 0.1, 0.35 * K_conv + 0.02,
+             f'Sig035={Sig035:.2f}% ({0.35*K_conv:.2f} мм/д)', fontsize=8, color='red')
 
-    ax2.set_xlabel('σ (%)')
-    ax2.set_ylabel('R (мкм/мин)')
-    ax2.set_title(f'R(σ%) — {Path(prn_path).stem}')
-    ax2.set_xlim(0, 6)
-    ax2.set_ylim(-0.05, 0.4)
-    ax2.legend(fontsize=8)
+    # s2 отметка
+    if 0 < s2 < 10:
+        ax2.axvline(x=s2, color='blue', linewidth=0.8, linestyle=':', alpha=0.5)
+        ax2.text(s2 - 0.3, 0.02, f's2={s2:.2f}%', fontsize=8, color='blue')
+
+    ax2.set_xlabel('Пересыщение σ (%)', fontsize=11)
+    ax2.set_ylabel('R (мм/день)', fontsize=11)
+    ax2.set_title(f'R(σ) — {Path(prn_path).stem}   te={te:.2f}°C  tn={tn:.2f}°C  Td={Td:.2f}°C',
+                  fontsize=12)
+    ax2.set_xlim(-0.5, max(z[:, 3]) * 1.05)
+    ax2.set_ylim(-0.05, max(z[:, 1]) * K_conv * 1.1)
+    ax2.legend(fontsize=9)
     ax2.grid(True, alpha=0.3)
 
+    # Эталоны Si/Si1 — конвертировать dT → σ% через растворимость
+    # σ% = 100·ln(C(tn)/C(tn-dT))
+    def dT_to_sigma(dT_vals, tn_val, co2_v, co3_v, co4_v):
+        """Конвертирует dT → σ%."""
+        Cn_v = co2_v + co3_v * tn_val + co4_v * tn_val ** 2
+        sigmas = []
+        for dt in dT_vals:
+            T = tn_val - dt
+            Cm = co2_v + co3_v * T + co4_v * T ** 2
+            if Cm > 0 and Cn_v > 0:
+                sigmas.append(100.0 * np.log(Cn_v / Cm))
+            else:
+                sigmas.append(0)
+        return np.array(sigmas)
+
+    Si_sigma = dT_to_sigma(Si[:, 1], tn, co2, co3, co4)
+    Si1_sigma = dT_to_sigma(Si1[:, 1], tn, co2, co3, co4)
+
+    # Фильтр: только dT > 0 (пропускаем dT=0 где R нефизично > 0)
+    mask_Si = Si[:, 1] > 0.01
+    mask_Si1 = Si1[:, 1] > 0.01
+
+    # Эталоны на отдельной правой оси (другой масштаб R!)
+    ax2ref = ax2.twinx()
+    ax2ref.plot(Si_sigma[mask_Si], Si[:, 0][mask_Si] * K_conv, 'g-o', markersize=5,
+                linewidth=1.2, label=f'Эталон CFe=0 (старая соль)', alpha=0.6)
+    ax2ref.plot(Si1_sigma[mask_Si1], Si1[:, 0][mask_Si1] * K_conv, 'r-d', markersize=5,
+                linewidth=1.2, label=f'Эталон CFe=16ppm (старая соль)', alpha=0.6)
+    ax2ref.set_ylabel('R эталон (мм/день)', fontsize=8, color='gray')
+    ax2ref.tick_params(axis='y', labelsize=7, colors='gray')
+    ax2ref.legend(fontsize=7, loc='center right')
+
+    ax2.legend(fontsize=8, loc='upper left')
+
+    # Правая ось Y уже используется для эталонов (ax2ref)
+
     out_name2 = f"R_sigma_exact_{Path(prn_path).stem}.png"
-    fig2.savefig(out_name2, dpi=150)
+    fig2.savefig(out_name2, dpi=150, bbox_inches='tight')
     print(f"График сохранён: {out_name2}")
     plt.close(fig2)
 
