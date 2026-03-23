@@ -617,6 +617,7 @@ def run_mathcad(prn_path, **kwargs):
     try:
         from skmisc.loess import loess as skmisc_loess
         lo = skmisc_loess(ta_arr, L_arr, span=span_L, degree=2)
+        lo.control.surface = 'direct'  # exact computation, no kd-tree interpolation
         lo.fit()
         T_smooth = lo.outputs.fitted_values
     except ImportError:
@@ -702,6 +703,7 @@ def run_mathcad(prn_path, **kwargs):
     try:
         from skmisc.loess import loess as skmisc_loess
         lo = skmisc_loess(VX, VY, span=span1, degree=2)
+        lo.control.surface = 'direct'
         lo.fit()
         VX_smooth = VX.copy()
         VY_smooth = lo.outputs.fitted_values
