@@ -43,7 +43,7 @@ span = 0.5      # LOESS span для s1/dissolution
 span1 = 0.2     # LOESS span для Sig035 и F1
 smooth_window = 5  # окно medsmooth (5 для 020326, 1 для 030226)
 z_split_index = None  # J1/J2 разбиение z (индекс строки, None=отключено)
-method = 'classic'  # 'classic' = baseline Mathcad, 'hybrid' = classic + Hilbert
+method = 'classic'  # 'classic' = baseline, 'hybrid' = classic+Hilbert, 'improved' = CMR+DualHilbert
 
 # --- Ручной tn (если задан оператором) ---
 tn_manual = None  # None = вычислить по формуле
@@ -142,8 +142,20 @@ def run_mathcad(prn_path, **kwargs):
     led2_safe = np.where(np.abs(led2) < 1e-10, 1e-10, led2)
     signal_raw = led1 / led2_safe
 
+    # ====== Optimal CMR (method='improved') ======
+    if method == 'improved':
+        # Оптимальный коэффициент подавления общей моды:
+        # α = cov(LED1,LED2) / var(LED2) → signal = LED1 - α·LED2
+        # Убирает общий дрейф источника (~20-30 дБ вместо ~15 дБ от ratio)
+        alpha_cmr = np.cov(led1, led2)[0, 1] / (np.var(led2) + 1e-10)
+        signal_cmr = led1 - alpha_cmr * led2
+        print(f"Optimal CMR: α = {alpha_cmr:.4f}")
+        # Для экстремумов и baseline используем CMR сигнал
+        signal_for_extrema = signal_cmr
+    else:
+        signal_for_extrema = signal_raw
+
     # Mathcad: S1 := medsmooth(a⟨9⟩, smooth_window)
-    # smooth_window=5 для 020326, smooth_window=1 для 030226
     if smooth_window > 1:
         S1 = medfilt(signal_raw, kernel_size=smooth_window)
     else:
@@ -594,6 +606,82 @@ def run_mathcad(prn_path, **kwargs):
                   f"mean={diff_in_growth.mean():.4f}")
         else:
             print("  Hilbert: мало экстремумов для калибровки, используем classic")
+
+    # ========================================================================
+    #  9c) IMPROVED: Optimal CMR + Dual-Channel Hilbert
+    # ========================================================================
+    if method == 'improved':
+        from scipy.signal import hilbert as _hilbert2
+        from scipy.signal import butter as _butter2, sosfiltfilt as _sosfiltfilt2
+
+        # Highpass каждый канал отдельно
+        nyq2 = 0.5
+        f_low2 = 0.0003
+        sos_hp2 = _butter2(4, f_low2 / nyq2, btype='high', output='sos')
+        led1_hp = _sosfiltfilt2(sos_hp2, led1)
+        led2_hp = _sosfiltfilt2(sos_hp2, led2)
+
+        # Hilbert каждого канала
+        analytic1 = _hilbert2(led1_hp)
+        analytic2 = _hilbert2(led2_hp)
+
+        phase1 = np.unwrap(np.angle(analytic1))
+        phase2 = np.unwrap(np.angle(analytic2))
+        amp1 = np.abs(analytic1)
+        amp2 = np.abs(analytic2)
+
+        # Взвешенное усреднение фаз (вес = амплитуда²)
+        w1_d = amp1 ** 2
+        w2_d = amp2 ** 2
+        phase_dual = (w1_d * phase1 + w2_d * phase2) / (w1_d + w2_d + 1e-10)
+        amplitude_dual = np.sqrt((amp1 ** 2 + amp2 ** 2) / 2.0)
+
+        # Амплитудная маска
+        amp_med_dual = float(np.median(amplitude_dual[:im1]))
+        amp_mask_dual = np.clip(amplitude_dual / (amp_med_dual + 1e-10), 0, 1)
+
+        # Метрика шума: разность фаз (должна быть ≈ const)
+        phase_diff = phase1 - phase2
+        phase_diff_std = float(np.std(phase_diff[:im1]))
+        print(f"Dual Hilbert: phase_diff std = {phase_diff_std:.4f} рад "
+              f"(в зоне роста, идеал ≈ 0)")
+
+        # Калибровка dual фазы по экстремумам
+        ext_positions = e_for_phase[:, 0].astype(int)
+        ext_positions = ext_positions[(ext_positions >= 0) & (ext_positions < m)]
+        phase_arcsin_at_ext = np.array([(np.pi / 2.0) * j for j in range(len(ext_positions))])
+        phase_dual_at_ext = phase_dual[ext_positions]
+
+        if len(ext_positions) >= 3:
+            coeffs_cal2 = np.polyfit(phase_dual_at_ext, phase_arcsin_at_ext, 1)
+            phase_dual_calibrated = coeffs_cal2[0] * phase_dual + coeffs_cal2[1]
+
+            # Субдискретизация на d-step
+            phase_dual_dstep = np.interp(
+                y[:, 0], np.arange(m, dtype=np.float64), phase_dual_calibrated
+            )
+            amp_dual_dstep = np.interp(
+                y[:, 0], np.arange(m, dtype=np.float64), amp_mask_dual
+            )
+
+            # Веса: classic=0.5 в зоне экстремумов, dual Hilbert=0.5*amp
+            # После im: classic=1 (dead zone)
+            last_ext_didx2 = int(e_for_phase[-1, 0] / d)
+            im_didx2 = min(int(im / d), g)
+
+            w_classic2 = np.ones(g + 1) * 0.5
+            w_classic2[im_didx2:] = 1.0
+            w_hilbert2 = (1.0 - w_classic2) * amp_dual_dstep
+            w_total2 = w_classic2 + w_hilbert2
+            w_total2 = np.where(w_total2 < 1e-10, 1.0, w_total2)
+
+            y[:, 2] = (w_classic2 * y_classic_phase + w_hilbert2 * phase_dual_dstep) / w_total2
+
+            print(f"Improved: classic вес={w_classic2.mean():.2f}, "
+                  f"dual_hilbert вес={w_hilbert2.mean():.2f}")
+            print(f"Фаза improved: y[0,2]={y[0,2]:.4f}, y[{g},2]={y[g,2]:.4f}")
+        else:
+            print("  Dual Hilbert: мало экстремумов для калибровки")
 
     # ========================================================================
     #  10) L1 — SLOPE ФАЗЫ ОТ ТЕМПЕРАТУРЫ
