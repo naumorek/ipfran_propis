@@ -43,6 +43,7 @@ span = 0.5      # LOESS span для s1/dissolution
 span1 = 0.2     # LOESS span для Sig035 и F1
 smooth_window = 5  # окно medsmooth (5 для 020326, 1 для 030226)
 z_split_index = None  # J1/J2 разбиение z (индекс строки, None=отключено)
+method = 'classic'  # 'classic' = baseline Mathcad, 'hybrid' = classic + Hilbert
 
 # --- Ручной tn (если задан оператором) ---
 tn_manual = None  # None = вычислить по формуле
@@ -103,7 +104,7 @@ def run_mathcad(prn_path, **kwargs):
     """
     global n1, n2, vq, k1, dtau, im1, isat1, im, isat
     global Salt, Acid, Face, d, ww, L0, span, span1, l, tn_manual
-    global smooth_window, z_split_index, vt1, vt2
+    global smooth_window, z_split_index, vt1, vt2, method
 
     # Переопределение параметров из kwargs
     for key, val in kwargs.items():
@@ -495,13 +496,104 @@ def run_mathcad(prn_path, **kwargs):
             # (продолжаем до конца, но Mathcad прерывает после последнего экстремума
             #  и заполняет оставшиеся в отдельном цикле — результат тот же)
 
-    # Mathcad НЕ clamp'ит фазу после последнего экстремума.
-    # Фаза продолжает осциллировать через arcsin, как и в зоне роста.
-    # Это даёт шумные скорости в dead zone, но slope(phase, T) в зоне im..isat
-    # усредняет их до малого Q → малый L1 → малая коррекция.
-    # Clamping НЕ применяется.
+    print(f"Фаза classic: y[0,2]={y[0,2]:.4f}, y[{g},2]={y[g,2]:.4f}")
 
-    print(f"Фаза построена: y[0,2]={y[0,2]:.4f}, y[{g},2]={y[g,2]:.4f}")
+    # Сохраняем classic фазу (для L1 calibration, даже в hybrid mode)
+    y_classic_phase = y[:, 2].copy()
+
+    # ========================================================================
+    #  9b) HILBERT ДОПОЛНЕНИЕ ФАЗЫ (method='hybrid')
+    # ========================================================================
+    if method == 'hybrid':
+        from scipy.signal import hilbert as _hilbert
+        from scipy.signal import butter, sosfiltfilt
+
+        # Highpass фильтр для удаления DC/тренда перед Hilbert
+        nyq = 0.5  # Nyquist для fs=1 Hz
+        f_low = 0.0003  # ~3000 сек период = убираем медленный тренд
+        sos_hp = butter(4, f_low / nyq, btype='high', output='sos')
+        signal_hp = sosfiltfilt(sos_hp, signal_raw)
+
+        # Hilbert transform → аналитический сигнал
+        analytic = _hilbert(signal_hp)
+        phase_hilbert_raw = np.unwrap(np.angle(analytic))
+        amplitude_hilbert = np.abs(analytic)
+
+        # Амплитудная маска: доверяем фазе только где амплитуда > порог
+        amp_median = float(np.median(amplitude_hilbert[:im1]))
+        amp_mask = amplitude_hilbert / (amp_median + 1e-10)  # нормализованная, ~1 в зоне роста
+        amp_mask = np.clip(amp_mask, 0, 1)
+
+        # Калибровка Hilbert фазы по экстремумам:
+        # В позициях экстремумов φ_hilbert должна совпадать с φ_arcsin
+        # Находим offset и масштаб через линейную регрессию
+        ext_positions = e_for_phase[:, 0].astype(int)
+        ext_positions = ext_positions[(ext_positions >= 0) & (ext_positions < m)]
+
+        # Arcsin фаза в позициях экстремумов: π/2 * j (по определению)
+        phase_arcsin_at_ext = np.array([(np.pi / 2.0) * j for j in range(len(ext_positions))])
+
+        # Hilbert фаза в тех же позициях
+        phase_hilbert_at_ext = phase_hilbert_raw[ext_positions]
+
+        if len(ext_positions) >= 3:
+            # Линейный фит: φ_arcsin = a * φ_hilbert + b
+            coeffs_cal = np.polyfit(phase_hilbert_at_ext, phase_arcsin_at_ext, 1)
+            a_cal, b_cal = coeffs_cal
+
+            # Откалиброванная Hilbert фаза
+            phase_hilbert_calibrated = a_cal * phase_hilbert_raw + b_cal
+
+            # Субдискретизация на d-step сетку
+            phase_hilbert_dstep = np.interp(
+                y[:, 0], np.arange(m, dtype=np.float64), phase_hilbert_calibrated
+            )
+            amp_dstep = np.interp(
+                y[:, 0], np.arange(m, dtype=np.float64), amp_mask
+            )
+
+            # Взвешенное объединение:
+            # w_classic = 1.0 вблизи экстремумов, убывает между ними
+            # w_hilbert = amplitude_mask * (1 - w_classic)
+            #
+            # Простой подход: classic имеет вес 0.8, Hilbert 0.2 в зоне экстремумов.
+            # После последнего экстремума: classic вес → 0, Hilbert → amp_mask.
+
+            last_ext_didx = int(e_for_phase[-1, 0] / d)
+            last_ext_didx = min(last_ext_didx, g)
+
+            w_classic = np.ones(g + 1) * 0.7  # базовый вес classic = 0.7
+            # После im (dead zone): classic вес = 1.0, Hilbert отключается
+            # Hilbert полезен только в зоне РОСТА (до im)
+            im_didx_h = int(im / d)
+            im_didx_h = min(im_didx_h, g)
+            w_classic[im_didx_h:] = 1.0  # dead zone + dissolution = только classic
+
+            w_hilbert = (1.0 - w_classic) * amp_dstep
+
+            # Нормализация весов
+            w_total = w_classic + w_hilbert
+            w_total = np.where(w_total < 1e-10, 1.0, w_total)
+
+            # Комбинированная фаза
+            y_classic_phase = y[:, 2].copy()  # сохраняем classic для L1 calibration
+            y[:, 2] = (w_classic * y_classic_phase + w_hilbert * phase_hilbert_dstep) / w_total
+
+            # ВАЖНО: L1 (slope фазы в dead zone) вычисляется из CLASSIC фазы,
+            # не hybrid. Иначе Hilbert drift в dead zone даёт огромный L1.
+            y_for_L1 = y_classic_phase  # используется ниже
+
+            print(f"Фаза hybrid: classic вес={w_classic.mean():.2f}, "
+                  f"hilbert вес={w_hilbert.mean():.2f}, "
+                  f"amp_mask mean={amp_dstep.mean():.2f}")
+            print(f"Фаза hybrid: y[0,2]={y[0,2]:.4f}, y[{g},2]={y[g,2]:.4f}")
+
+            # Калибровка проверка: разница classic vs hybrid в зоне экстремумов
+            diff_in_growth = np.abs(y_classic_phase[:last_ext_didx] - y[:last_ext_didx, 2])
+            print(f"  Разница classic vs hybrid в зоне роста: max={diff_in_growth.max():.4f}, "
+                  f"mean={diff_in_growth.mean():.4f}")
+        else:
+            print("  Hilbert: мало экстремумов для калибровки, используем classic")
 
     # ========================================================================
     #  10) L1 — SLOPE ФАЗЫ ОТ ТЕМПЕРАТУРЫ
@@ -548,9 +640,12 @@ def run_mathcad(prn_path, **kwargs):
             v_didx = i - 1
             break
 
+    # Для L1: используем classic фазу (hybrid Hilbert drift искажает L1)
+    P_phases_for_L1 = y_classic_phase if method == 'hybrid' else y[:, 2]
+
     if v_didx > u_didx + 2:
         l2_temps = y[u_didx:v_didx + 1, 3]
-        P_phases = y[u_didx:v_didx + 1, 2]
+        P_phases = P_phases_for_L1[u_didx:v_didx + 1]
         if len(l2_temps) > 2 and np.std(l2_temps) > 1e-10:
             Q_slope = np.polyfit(l2_temps, P_phases, 1)[0]
         else:
