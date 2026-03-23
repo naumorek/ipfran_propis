@@ -56,7 +56,7 @@ def main():
     # ========================================================================
     # РИСУЕМ
     # ========================================================================
-    fig = plt.figure(figsize=(20, 16))
+    fig = plt.figure(figsize=(20, 22))
     fig.patch.set_facecolor('white')
 
     # Цвета
@@ -67,7 +67,7 @@ def main():
     C_ZONE = '#FFE0B2'     # зона dead zone
 
     # ====== SUBPLOT 1: Сырой сигнал + экстремумы ======
-    ax1 = fig.add_subplot(2, 2, 1)
+    ax1 = fig.add_subplot(3, 2, 1)
     x_axis = np.arange(m)
     ax1.plot(x_axis, signal_raw, color=C_RAW, linewidth=0.3, alpha=0.7, label=f'Сигнал ({m} отсчётов)')
     ax1.axhline(y=y0, color='green', linewidth=0.8, linestyle='--', alpha=0.5, label=f'Baseline y0={y0:.3f}')
@@ -97,7 +97,7 @@ def main():
              verticalalignment='bottom')
 
     # ====== SUBPLOT 2: Фаза + L ======
-    ax2 = fig.add_subplot(2, 2, 2)
+    ax2 = fig.add_subplot(3, 2, 2)
 
     # Фаза (левая ось)
     color_phase = C_INTERP
@@ -137,8 +137,8 @@ def main():
              bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9),
              verticalalignment='bottom')
 
-    # ====== SUBPLOT 3: R(σ%) ======
-    ax3 = fig.add_subplot(2, 2, 3)
+    # ====== SUBPLOT 3: R(σ%) в мкм/мин ======
+    ax3 = fig.add_subplot(3, 2, 3)
 
     # Точки R
     ax3.scatter(z[:, 3], z[:, 1], color=C_RAW, s=1, alpha=0.3,
@@ -180,12 +180,44 @@ def main():
              bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9),
              verticalalignment='bottom')
 
-    # ====== SUBPLOT 4: R(dT) финальный ======
-    ax4 = fig.add_subplot(2, 2, 4)
+    # ====== SUBPLOT 4: R(σ%) в мм/день (практические единицы) ======
+    ax4 = fig.add_subplot(3, 2, 4)
+
+    K = 1.441  # мкм/мин → мм/день
+
+    ax4.scatter(z[:, 3], z[:, 1] * K, color=C_RAW, s=1, alpha=0.3,
+                label=f'R ({n_rates} точек)')
+    ax4.plot(sigma_grid, F1_vals * K, color=C_SMOOTH, linewidth=2,
+             label='F1 (LOESS)')
+
+    # Порог Sig035 в мм/день
+    ax4.axhline(y=0.35 * K, color='red', linewidth=0.8, linestyle='--', alpha=0.7)
+    ax4.axvline(x=Sig035, color='red', linewidth=0.8, linestyle=':', alpha=0.7)
+    ax4.text(Sig035 + 0.1, 0.35 * K + 0.02, f'Sig035={Sig035:.2f}%\n({0.35*K:.2f} мм/д)',
+             fontsize=8, color='red')
+
+    ax4.set_xlabel('Пересыщение σ (%)')
+    ax4.set_ylabel('Скорость R (мм/день)')
+    ax4.set_title('4. СКОРОСТЬ РОСТА R(σ) — мм/день', fontsize=12, fontweight='bold')
+    ax4.set_xlim(-0.5, 6)
+    ax4.set_ylim(-0.1, max(z[:, 1]) * K * 1.1)
+    ax4.legend(fontsize=7, loc='upper left')
+
+    ax4.text(0.55, 0.02,
+             f'1 мкм/мин × 1.441 = 1 мм/день\n'
+             f'R max = {z[:,1].max()*K:.2f} мм/день\n'
+             f'Sig035 = {Sig035:.2f}% ({0.35*K:.2f} мм/д)\n'
+             f'Типичный рост KDP: 1-3 мм/день',
+             transform=ax4.transAxes, fontsize=8, fontfamily='monospace',
+             bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9),
+             verticalalignment='bottom')
+
+    # ====== SUBPLOT 5: R(dT) финальный ======
+    ax5 = fig.add_subplot(3, 2, 5)
 
     z_dT = tn - z[:, 2]
-    ax4.scatter(z_dT, 1.441 * z[:, 1], color=C_RAW, s=1, alpha=0.3,
-                label=f'R×1.441 ({n_rates} точек)')
+    ax5.scatter(z_dT, 1.441 * z[:, 1], color=C_RAW, s=1, alpha=0.3,
+                label=f'R ({n_rates} точек)')
 
     # F1 на dT сетке
     dT_grid = np.linspace(0, 4, 500)
@@ -198,28 +230,28 @@ def main():
         else:
             sigma = 0
         F1_dT[idx] = float(F1(sigma))
-    ax4.plot(dT_grid, 1.441 * F1_dT, color=C_SMOOTH, linewidth=2, label='F1×1.441 (LOESS)')
+    ax5.plot(dT_grid, 1.441 * F1_dT, color=C_SMOOTH, linewidth=2, label='F1 (LOESS)')
 
     # Эталоны
-    ax4.plot(Si[:, 1], 1.441 * Si[:, 0], 'b-o', markersize=5, linewidth=1,
+    ax5.plot(Si[:, 1], 1.441 * Si[:, 0], 'b-o', markersize=5, linewidth=1,
              label=f'Si (эталон, CFe=0)')
-    ax4.plot(Si1[:, 1], 1.441 * Si1[:, 0], 'g-d', markersize=5, linewidth=1,
+    ax5.plot(Si1[:, 1], 1.441 * Si1[:, 0], 'g-d', markersize=5, linewidth=1,
              label=f'Si1 (эталон, CFe=16ppm)')
 
-    ax4.set_xlabel('Переохлаждение dT (°C)')
-    ax4.set_ylabel('R (мм/день)')
-    ax4.set_title('4. ИТОГОВЫЙ ГРАФИК R(dT)', fontsize=12, fontweight='bold')
-    ax4.set_xlim(0, 4)
-    ax4.set_ylim(-0.1, 4)
-    ax4.legend(fontsize=7, loc='upper left')
+    ax5.set_xlabel('Переохлаждение dT (°C)')
+    ax5.set_ylabel('R (мм/день)')
+    ax5.set_title('5. ИТОГОВЫЙ ГРАФИК R(dT) — мм/день', fontsize=12, fontweight='bold')
+    ax5.set_xlim(0, 4)
+    ax5.set_ylim(-0.1, 4)
+    ax5.legend(fontsize=7, loc='upper left')
 
-    ax4.text(0.55, 0.02,
+    ax5.text(0.55, 0.02,
              f'te={te:.2f}°C  tn={tn:.2f}°C\n'
              f'Td={Td:.2f}°C  s2={r["s2"]:.2f}\n'
              f'Sig035={Sig035:.2f}%\n'
              f'Эталоны Si/Si1: 8 точек каждый\n'
              f'(полиномиальная аппроксимация)',
-             transform=ax4.transAxes, fontsize=8, fontfamily='monospace',
+             transform=ax5.transAxes, fontsize=8, fontfamily='monospace',
              bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9),
              verticalalignment='bottom')
 
@@ -231,7 +263,7 @@ def main():
         fontsize=13, fontweight='bold', y=0.98
     )
 
-    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
 
     out = 'algorithm_analysis.jpg'
     fig.savefig(out, dpi=200, bbox_inches='tight', facecolor='white')
