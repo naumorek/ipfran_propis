@@ -178,7 +178,10 @@ def run_mathcad(prn_path, **kwargs):
     # Mathcad: t(x) := linterp(tau, t, x) — интерп. температуры
     # Mathcad: Tau(x) := linterp(tau, a1, x) — интерп. времени
     tau_v = np.arange(m, dtype=np.float64)  # индексы = "время"
-    I_func = interp1d(tau_v, S1, kind='linear', fill_value='extrapolate', bounds_error=False)
+    # Mathcad: I(x) := linterp(tau, I, x) where I_v := S2_v (нефильтрованный signal_raw!)
+    # S2 = signal_raw используется для интерполяции сигнала и для экстремумов.
+    # S1 (медианно-фильтрованный) используется только для baseline y0/y0s.
+    I_func = interp1d(tau_v, signal_raw, kind='linear', fill_value='extrapolate', bounds_error=False)
     t_func = interp1d(tau_v, a[:, 4] - 273.15, kind='linear', fill_value='extrapolate', bounds_error=False)
 
     # ========================================================================
@@ -304,10 +307,13 @@ def run_mathcad(prn_path, **kwargs):
 
         return np.column_stack([positions, values])
 
-    # Phase 1: zero-crossings
+    # Phase 1: zero-crossings (используем S1 = медианно-фильтрованный)
     f_crossings = find_zero_crossings_f(S1, y0, 0, im1)
     # Phase 2: extrema within intervals
-    extrs_raw = find_extrema_e(S1, y0, f_crossings, 0, im1)
+    # КЛЮЧЕВОЕ: Mathcad использует S2 = signal_raw (НЕфильтрованный!) для поиска
+    # экстремумов, но baseline y0 из S1 (фильтрованного). Подтверждено сравнением:
+    # signal_raw[92] = 2.4545 = Mathcad S2[0,1], а S1[92] = 2.4494 ≠ 2.4545.
+    extrs_raw = find_extrema_e(signal_raw, y0, f_crossings, 0, im1)
     h_ext = len(extrs_raw)
     print(f"Экстремумов (raw): {h_ext}")
 
