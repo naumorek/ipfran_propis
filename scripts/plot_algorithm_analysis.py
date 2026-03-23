@@ -72,10 +72,19 @@ def main():
     ax1.plot(x_axis, signal_raw, color=C_RAW, linewidth=0.3, alpha=0.7, label=f'Сигнал ({m} отсчётов)')
     ax1.axhline(y=y0, color='green', linewidth=0.8, linestyle='--', alpha=0.5, label=f'Baseline y0={y0:.3f}')
 
-    # Зоны
-    ax1.axvspan(im1, im, alpha=0.15, color='orange', label='Dead zone')
-    ax1.axvspan(im, isat, alpha=0.10, color='red')
-    ax1.axvspan(isat, isat1, alpha=0.08, color='purple')
+    # Зоны (физический смысл):
+    # 0..im1 = зона роста (кристалл растёт, полосы видны)
+    # im..isat = dead zone (нет роста, нет растворения)
+    # isat..isat1 = зона растворения
+    ax1.axvspan(0, im1, alpha=0.05, color='green')
+    ax1.axvspan(im, isat, alpha=0.15, color='orange', label=f'Dead zone (im={im}..isat={isat})')
+    ax1.axvspan(isat, isat1, alpha=0.10, color='red', label=f'Растворение (isat..isat1)')
+
+    # Границы — вертикальные линии
+    ax1.axvline(x=im1, color='blue', linewidth=0.8, linestyle=':', alpha=0.5, label=f'im1={im1} (конец полос)')
+    ax1.axvline(x=im, color='orange', linewidth=1.2, linestyle='-', alpha=0.7, label=f'im={im} (начало dead zone)')
+    ax1.axvline(x=isat, color='red', linewidth=1.2, linestyle='-', alpha=0.7, label=f'isat={isat} (начало растворения)')
+    ax1.axvline(x=isat1, color='purple', linewidth=0.8, linestyle=':', alpha=0.5)
 
     # Экстремумы — РЕАЛЬНЫЕ точки
     ax1.scatter(e[:, 0], e[:, 1], color=C_REAL, s=60, zorder=5, edgecolors='black',
