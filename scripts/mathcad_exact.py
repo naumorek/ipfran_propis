@@ -1199,18 +1199,52 @@ def run_mathcad(prn_path, **kwargs):
     ax2.legend(fontsize=9)
     ax2.grid(True, alpha=0.3)
 
-    # Эталоны НЕ рисуем на R(σ) — они определены для R(dT).
-    # Конверсия dT → σ нелинейна и искажает форму кривой
-    # (меняет знак второй производной). Эталоны только на R(dT) графике.
+    # Правая ось Y — эталоны (другой масштаб)
+    ax2ref = ax2.twinx()
+    ax2ref.set_ylabel('R эталон (мм/день)', fontsize=8, color='gray')
+    ax2ref.tick_params(axis='y', labelsize=7, colors='gray')
 
+    # Эталоны на R(σ): плотная кривая через интерполяцию (не 7 точек линиями!)
+    # dT → σ нелинейна, но при плотной сетке dT кривая корректна.
+    from scipy.interpolate import interp1d as _interp1d
+    Cn_ref = co2 + co3 * tn + co4 * tn ** 2
+
+    # Фильтр: dT > 0 для эталонов
+    mask_Si_pos = Si[:, 1] > 0.001
+    mask_Si1_pos = Si1[:, 1] > 0.001
+
+    if np.sum(mask_Si_pos) >= 2:
+        # Интерполируем R(dT) на плотную сетку, потом конвертируем dT → σ
+        Si_interp = _interp1d(Si[mask_Si_pos, 1], Si[mask_Si_pos, 0], kind='linear',
+                               fill_value='extrapolate', bounds_error=False)
+        dT_dense = np.linspace(Si[mask_Si_pos, 1].min(), Si[mask_Si_pos, 1].max(), 200)
+        R_Si_dense = Si_interp(dT_dense)
+        sigma_Si_dense = np.array([
+            100.0 * np.log(Cn_ref / (co2 + co3 * (tn - dt) + co4 * (tn - dt)**2))
+            if (co2 + co3 * (tn - dt) + co4 * (tn - dt)**2) > 0 else 0
+            for dt in dT_dense
+        ])
+        # Фильтр: σ > 0.2% (убрать нефизичные точки при σ→0)
+        mask_dense = sigma_Si_dense > 0.2
+        ax2ref.plot(sigma_Si_dense[mask_dense], R_Si_dense[mask_dense] * K_conv, 'g-', linewidth=1.5,
+                    alpha=0.6, label='Эталон CFe=0 (старая соль)')
+
+    if np.sum(mask_Si1_pos) >= 2:
+        Si1_interp = _interp1d(Si1[mask_Si1_pos, 1], Si1[mask_Si1_pos, 0], kind='linear',
+                                fill_value='extrapolate', bounds_error=False)
+        dT_dense1 = np.linspace(Si1[mask_Si1_pos, 1].min(), Si1[mask_Si1_pos, 1].max(), 200)
+        R_Si1_dense = Si1_interp(dT_dense1)
+        sigma_Si1_dense = np.array([
+            100.0 * np.log(Cn_ref / (co2 + co3 * (tn - dt) + co4 * (tn - dt)**2))
+            if (co2 + co3 * (tn - dt) + co4 * (tn - dt)**2) > 0 else 0
+            for dt in dT_dense1
+        ])
+        mask_dense1 = sigma_Si1_dense > 0.2
+        ax2ref.plot(sigma_Si1_dense[mask_dense1], R_Si1_dense[mask_dense1] * K_conv, 'r-', linewidth=1.5,
+                    alpha=0.6, label='Эталон CFe=16ppm (старая соль)')
+
+    ax2ref.legend(fontsize=7, loc='center right')
     ax2.legend(fontsize=8, loc='upper left')
-
-    # Правая ось Y — мкм/мин
-    ax2r = ax2.twinx()
-    y_max = max(z[:, 1]) * 1.1
-    ax2r.set_ylim(-0.05 / K_conv, y_max)
-    ax2r.set_ylabel('R (мкм/мин)', fontsize=9, alpha=0.5)
-    ax2r.tick_params(axis='y', labelsize=8, colors='gray')
 
     out_name2 = f"R_sigma_exact_{Path(prn_path).stem}.png"
     fig2.savefig(out_name2, dpi=150, bbox_inches='tight')
