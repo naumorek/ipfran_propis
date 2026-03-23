@@ -1199,41 +1199,18 @@ def run_mathcad(prn_path, **kwargs):
     ax2.legend(fontsize=9)
     ax2.grid(True, alpha=0.3)
 
-    # Эталоны Si/Si1 — конвертировать dT → σ% через растворимость
-    # σ% = 100·ln(C(tn)/C(tn-dT))
-    def dT_to_sigma(dT_vals, tn_val, co2_v, co3_v, co4_v):
-        """Конвертирует dT → σ%."""
-        Cn_v = co2_v + co3_v * tn_val + co4_v * tn_val ** 2
-        sigmas = []
-        for dt in dT_vals:
-            T = tn_val - dt
-            Cm = co2_v + co3_v * T + co4_v * T ** 2
-            if Cm > 0 and Cn_v > 0:
-                sigmas.append(100.0 * np.log(Cn_v / Cm))
-            else:
-                sigmas.append(0)
-        return np.array(sigmas)
-
-    Si_sigma = dT_to_sigma(Si[:, 1], tn, co2, co3, co4)
-    Si1_sigma = dT_to_sigma(Si1[:, 1], tn, co2, co3, co4)
-
-    # Фильтр: только dT > 0 (пропускаем dT=0 где R нефизично > 0)
-    mask_Si = Si[:, 1] > 0.01
-    mask_Si1 = Si1[:, 1] > 0.01
-
-    # Эталоны на отдельной правой оси (другой масштаб R!)
-    ax2ref = ax2.twinx()
-    ax2ref.plot(Si_sigma[mask_Si], Si[:, 0][mask_Si] * K_conv, 'g-o', markersize=5,
-                linewidth=1.2, label=f'Эталон CFe=0 (старая соль)', alpha=0.6)
-    ax2ref.plot(Si1_sigma[mask_Si1], Si1[:, 0][mask_Si1] * K_conv, 'r-d', markersize=5,
-                linewidth=1.2, label=f'Эталон CFe=16ppm (старая соль)', alpha=0.6)
-    ax2ref.set_ylabel('R эталон (мм/день)', fontsize=8, color='gray')
-    ax2ref.tick_params(axis='y', labelsize=7, colors='gray')
-    ax2ref.legend(fontsize=7, loc='center right')
+    # Эталоны НЕ рисуем на R(σ) — они определены для R(dT).
+    # Конверсия dT → σ нелинейна и искажает форму кривой
+    # (меняет знак второй производной). Эталоны только на R(dT) графике.
 
     ax2.legend(fontsize=8, loc='upper left')
 
-    # Правая ось Y уже используется для эталонов (ax2ref)
+    # Правая ось Y — мкм/мин
+    ax2r = ax2.twinx()
+    y_max = max(z[:, 1]) * 1.1
+    ax2r.set_ylim(-0.05 / K_conv, y_max)
+    ax2r.set_ylabel('R (мкм/мин)', fontsize=9, alpha=0.5)
+    ax2r.tick_params(axis='y', labelsize=8, colors='gray')
 
     out_name2 = f"R_sigma_exact_{Path(prn_path).stem}.png"
     fig2.savefig(out_name2, dpi=150, bbox_inches='tight')
