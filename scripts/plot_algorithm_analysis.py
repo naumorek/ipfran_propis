@@ -241,15 +241,16 @@ def main():
         F1_dT[idx] = float(F1(sigma))
     ax5.plot(dT_grid, 1.441 * F1_dT, color=C_SMOOTH, linewidth=2, label='F1 (LOESS)')
 
-    # Эталоны — показываем на ОТДЕЛЬНОЙ оси Y (масштаб другой!)
-    # Эталоны из Mathcad для динамической конвекции, наши данные — естественная.
-    # Поэтому абсолютные значения не сопоставимы, но ФОРМА кривой — да.
+    # Эталоны — на ОТДЕЛЬНОЙ оси Y (масштаб другой, старая соль)
+    # b = KDP нейтральный, CFe=0 (старая чистая соль)
+    # b1 = KDP нейтральный, CFe=16ppm (старая соль + железо)
+    # ВНИМАНИЕ: b1 > b при всех dT (старая чистая соль росла медленнее!)
     ax5r = ax5.twinx()
     ax5r.plot(Si[:, 1], 1.441 * Si[:, 0], 'b--o', markersize=4, linewidth=0.8, alpha=0.4,
-              label=f'Si эталон CFe=0 (правая ось)')
+              label=f'Старая соль, CFe=0 (b)')
     ax5r.plot(Si1[:, 1], 1.441 * Si1[:, 0], 'r--d', markersize=4, linewidth=0.8, alpha=0.4,
-              label=f'Si1 эталон CFe=16ppm (правая ось)')
-    ax5r.set_ylabel('R эталон (мм/день)', fontsize=8, alpha=0.5)
+              label=f'Старая соль + Fe=16ppm (b1)')
+    ax5r.set_ylabel('R эталон, старая соль (мм/день)', fontsize=7, alpha=0.5)
     ax5r.tick_params(axis='y', labelsize=7, colors='gray')
     ax5r.legend(fontsize=6, loc='center right')
 
@@ -265,8 +266,8 @@ def main():
              f'Td={Td:.2f}°C  s2={r["s2"]:.2f}\n'
              f'Sig035={Sig035:.2f}%\n'
              f'R max = {z[:,1].max()*1.441:.2f} мм/день\n'
-             f'Эталоны — другой масштаб\n'
-             f'(динамич. конвекция, правая ось)',
+             f'Эталоны (правая ось) — старая соль,\n'
+             f'абс. значения не сопоставимы',
              transform=ax5.transAxes, fontsize=8, fontfamily='monospace',
              bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9),
              verticalalignment='top')
