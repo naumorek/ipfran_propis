@@ -724,17 +724,33 @@ def run_mathcad(prn_path, **kwargs):
     # VX1 используется для Sig035, G_h, s2 (Q regression)
     # Grid search (s) использует ПОЛНЫЕ VX/VY, НЕ обрезанные VX1!
 
-    # VX1/VY1: обрезка по RAW VY (не сглаженным!), как в Mathcad
-    t_start = 0
-    for k_idx in range(len(VY)):
+    # Mathcad VX1/VY1: VX1 = копия VX ДО первого VY > 0.01 (dead zone + переход).
+    # В Mathcad R в dead zone (σ < 0) → 0. У нас R > 0 из-за LOESS overshooting.
+    #
+    # Fix: пропускаем dissolution zone (σ < 0, далеко от dead zone),
+    # начинаем проверку VY > 0.01 только от σ ≈ 0 (около tn).
+    # В Mathcad R в dead zone (σ ≈ 0) → 0. У нас LOESS overshooting при σ < 0.
+
+    # σ ≈ 0 = tn boundary. Пропускаем все точки с σ < 0.
+    dead_zone_sigma = 0.0
+    skip_dissolution = 0
+    for k_idx in range(len(VX)):
+        if VX[k_idx] >= dead_zone_sigma:
+            skip_dissolution = k_idx
+            break
+
+    # Теперь ищем первый VY > 0.01 начиная от dead zone boundary
+    t_start = len(VX)
+    for k_idx in range(skip_dissolution, len(VX)):
         if VY[k_idx] > 0.01:
             t_start = k_idx
             break
 
-    VX1 = VX[t_start:].copy()
-    VY1 = VY[t_start:].copy()
+    # VX1 = VX[0..t_start] (dissolution + dead zone + переход)
+    VX1 = VX[:t_start + 1].copy()
+    VY1 = VY[:t_start + 1].copy()
     n_vx1 = len(VX1) - 1
-    print(f"VX1/VY1: {len(VX1)} точек (от σ={VX1[0]:.3f}% до σ={VX1[-1]:.3f}%)")
+    print(f"VX1/VY1: {len(VX1)} точек (от σ={VX1[0]:.3f}% до σ={VX1[-1] if len(VX1)>0 else 0:.3f}%)")
 
     # ========================================================================
     #  14) Sig035 — ПЕРВЫЙ σ ГДЕ F1(σ) > 0.35
