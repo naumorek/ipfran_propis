@@ -1109,24 +1109,20 @@ def run_mathcad(prn_path, **kwargs):
     # dT для z-данных
     z_dT = tn - z[:, 2]  # dT = tn - T
 
-    # Si[:,1] = σ%, НЕ dT! Конвертируем σ → dT через обратную растворимость
-    # σ% = 100·ln(Cn/C(T)) → C(T) = Cn/exp(σ/100) → T из C(T) = co2+co3·T+co4·T²
+    # Si[:,0] = σ% (зависит от te), Si[:,1] = R (мкм/мин)
+    # Для R(dT) графика: конвертируем σ% → dT через обратную растворимость
     from scipy.optimize import brentq as _brentq
-
-    def sigma_to_dT(sigma_pct, tn_val, co2_v, co3_v, co4_v):
-        """Конвертирует σ% → dT через обратную растворимость."""
-        Cn_v = co2_v + co3_v * tn_val + co4_v * tn_val ** 2
-        C_target = Cn_v / np.exp(sigma_pct / 100.0)
-        # Решаем co2 + co3·T + co4·T² = C_target
+    def sigma_to_dT(sigma_pct):
+        if sigma_pct <= 0:
+            return 0.0
+        C_target = Cn / np.exp(sigma_pct / 100.0)
         try:
-            T = _brentq(lambda T: co2_v + co3_v * T + co4_v * T ** 2 - C_target,
-                        tn_val - 20, tn_val + 5)
-            return tn_val - T
-        except Exception:
-            return sigma_pct  # fallback
-
-    Si_dT = np.array([sigma_to_dT(Si[j, 1], tn, co2, co3, co4) for j in range(len(Si))])
-    Si1_dT = np.array([sigma_to_dT(Si1[j, 1], tn, co2, co3, co4) for j in range(len(Si1))])
+            T = _brentq(lambda T: co2 + co3 * T + co4 * T ** 2 - C_target, tn - 20, tn + 1)
+            return max(0, tn - T)
+        except:
+            return 0.0
+    Si_dT = np.array([sigma_to_dT(Si[j, 0]) for j in range(len(Si))])
+    Si1_dT = np.array([sigma_to_dT(Si1[j, 0]) for j in range(len(Si1))])
 
     fig, ax = plt.subplots(1, 1, figsize=(10, 7))
 
@@ -1150,11 +1146,11 @@ def run_mathcad(prn_path, **kwargs):
 
     ax.plot(dT_grid, 1.441 * F1_on_dT, 'r-', linewidth=1.5, label='F1 (LOESS)')
 
-    # Trace 3: Si (reference, clean/low Fe) — синяя сплошная
-    ax.plot(Si_dT, 1.441 * Si[:, 0], 'b-o', markersize=4, label=f'Si (Acid={Acid}, low Fe)')
+    # Trace 3: Si (reference, CFe=0) — зелёная
+    ax.plot(Si_dT, 1.441 * Si[:, 1], 'g-o', markersize=4, label='Эталон CFe=0 (старая соль)')
 
-    # Trace 4: Si1 (reference, high Fe) — зелёная сплошная
-    ax.plot(Si1_dT, 1.441 * Si1[:, 0], 'g-d', markersize=4, label=f'Si1 (Acid={Acid}, high Fe)')
+    # Trace 4: Si1 (reference, CFe=16ppm) — красная
+    ax.plot(Si1_dT, 1.441 * Si1[:, 1], 'r-d', markersize=4, label='Эталон CFe=16ppm (старая соль)')
 
     ax.set_xlabel('dT (°C)')
     ax.set_ylabel('R (mm/day)')
@@ -1210,26 +1206,23 @@ def run_mathcad(prn_path, **kwargs):
     ax2.set_title(f'R(σ) — {Path(prn_path).stem}   te={te:.2f}°C  tn={tn:.2f}°C  Td={Td:.2f}°C',
                   fontsize=12)
     ax2.set_xlim(-0.5, max(z[:, 3]) * 1.05)
-    ax2.set_ylim(-0.05, max(z[:, 1]) * K_conv * 1.1)
+    y2_max_mm = max(max(z[:, 1]), max(Si[:, 1]), max(Si1[:, 1])) * K_conv * 1.1
+    ax2.set_ylim(-0.1, y2_max_mm)
     ax2.legend(fontsize=9)
     ax2.grid(True, alpha=0.3)
 
-    # Эталоны Si/Si1 ИЗНАЧАЛЬНО определены в координатах R(σ%):
-    # Si[j,0] = R (мкм/мин) при σ = Si[j,1] (%)
-    # Столбец 3 таблиц a/b/a1/b1 = σ%, НЕ dT!
-    # Рисуем напрямую без конверсии.
-    ax2.plot(Si[:, 1], Si[:, 0] * K_conv, 'g-o', markersize=5, linewidth=1.2,
+    # Эталоны Si/Si1: Si[j,0] = σ% (зависит от te), Si[j,1] = R (мкм/мин, фиксирован)
+    # "Аппроксимация Sig(t)" = σ при данном R как функция te
+    # На графике R(σ): X = Si[j,0] = σ%, Y = Si[j,1]·1.441 = R мм/день
+    ax2.plot(Si[:, 0], Si[:, 1] * K_conv, 'g-o', markersize=5, linewidth=1.2,
              alpha=0.7, label='Эталон CFe=0 (старая соль)')
-    ax2.plot(Si1[:, 1], Si1[:, 0] * K_conv, 'r-d', markersize=5, linewidth=1.2,
+    ax2.plot(Si1[:, 0], Si1[:, 1] * K_conv, 'r-d', markersize=5, linewidth=1.2,
              alpha=0.7, label='Эталон CFe=16ppm (старая соль)')
-
-    # Обновить ylim чтобы вместить эталоны
-    all_R = np.concatenate([z[:, 1] * K_conv, Si[:, 0] * K_conv, Si1[:, 0] * K_conv])
-    ax2.set_ylim(-0.1, max(all_R) * 1.05)
 
     # Правая ось Y — мкм/мин
     ax2r = ax2.twinx()
-    ax2r.set_ylim(-0.1 / K_conv, max(all_R) / K_conv * 1.05)
+    y2_max = max(max(z[:, 1]), max(Si[:, 1]), max(Si1[:, 1])) * 1.1
+    ax2r.set_ylim(-0.05, y2_max)
     ax2r.set_ylabel('R (мкм/мин)', fontsize=9, alpha=0.5)
     ax2r.tick_params(axis='y', labelsize=8, colors='gray')
 
