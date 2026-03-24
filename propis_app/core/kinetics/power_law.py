@@ -122,7 +122,7 @@ def _grid_search_s1_mathcad(sigma_percent: np.ndarray, rate: np.ndarray,
 def compute_sig035_loess(sigma_percent: np.ndarray, rate: np.ndarray,
                          span: float = 0.2) -> float:
     """
-    Sig035: first sigma% where LOESS-smoothed R(sigma) > 0.35 mm/day.
+    Sig035: first sigma% where LOESS-smoothed R(sigma) > 0.504 mm/day (= 0.35 мкм/мин).
 
     Mathcad uses loess() + interp() with span=0.2 (or span1).
 
@@ -164,9 +164,9 @@ def compute_sig035_loess(sigma_percent: np.ndarray, rate: np.ndarray,
         VY_smooth = np.convolve(VY, kernel, mode='same')
         VX_smooth = VX
 
-    # Find first sigma where smoothed R > 0.35
+    # Find first sigma where smoothed R > 0.504 mm/day (= 0.35 мкм/мин * 1.44)
     for i in range(len(VX_smooth)):
-        if VY_smooth[i] > 0.35:
+        if VY_smooth[i] > 0.504:
             return float(VX_smooth[i])
 
     return float(VX_smooth[-1]) if len(VX_smooth) > 0 else 0.0
@@ -205,7 +205,7 @@ def compute_s2_mathcad(sigma_percent: np.ndarray, rate: np.ndarray) -> float:
     for i in range(len(rate)):
         if rate[i] < 0:
             break
-        if 0 < rate[i] < 0.3 and sigma_percent[i] > 0:
+        if 0 < rate[i] < 0.432 and sigma_percent[i] > 0:  # 0.3 мкм/мин * 1.44 = 0.432 мм/день
             sigma_sel.append(sigma_percent[i])
             sqrt_r_sel.append(np.sqrt(rate[i]))
 
@@ -242,6 +242,45 @@ def compute_s2(sigma_percent: np.ndarray, rate: np.ndarray,
                s1: float = 0.0) -> float:
     """Legacy: compute s2. Now delegates to Mathcad formula."""
     return compute_s2_mathcad(sigma_percent, rate)
+
+
+def fit_dissolution(sigma_percent: np.ndarray, rate: np.ndarray,
+                    w: float = 1.0) -> PowerLawResult:
+    """
+    Fit dissolution branch: R < 0, sigma < 0.
+
+    Takes raw (negative) sigma and rate, mirrors to positive,
+    fits the same power law, then stores dissolution parameters.
+
+    Model: R(σ) = -s0_d * (|σ| - s1_d)^w   for σ < -s1_d
+
+    Returns PowerLawResult with s0_d, s1_d (positive values).
+    """
+    # Select dissolution data: sigma < 0 AND rate < 0
+    mask = np.isfinite(sigma_percent) & np.isfinite(rate) & (sigma_percent < 0) & (rate < 0)
+    sigma_diss = np.abs(sigma_percent[mask])   # mirror to positive
+    rate_diss = np.abs(rate[mask])              # mirror to positive
+
+    if len(sigma_diss) < 3:
+        return PowerLawResult(
+            s0=0, s1=0, w=w, residual=np.inf,
+            sigma_percent=sigma_diss, rate_measured=rate_diss,
+            rate_fitted=np.zeros_like(rate_diss),
+            sig035=0, s2=0,
+        )
+
+    # Same grid search on mirrored data
+    s0_d, s1_d, residual = _grid_search_s1_mathcad(sigma_diss, rate_diss, w=w)
+
+    rate_fitted = power_law_model(sigma_diss, s0_d, s1_d, w)
+
+    return PowerLawResult(
+        s0=s0_d, s1=s1_d, w=w, residual=residual,
+        sigma_percent=sigma_diss,
+        rate_measured=rate_diss,
+        rate_fitted=rate_fitted,
+        sig035=0, s2=0,
+    )
 
 
 def fit_power_law(sigma_percent: np.ndarray, rate: np.ndarray,

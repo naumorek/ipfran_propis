@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-Plot R(dT) kinetic curves in Mathcad style (Base_grath).
+Plot R(dT) kinetic curves: Classic vs Modern side-by-side + overlay.
+
+For each test case, generates one image with 3 subplots:
+  Left:   Classic (Mathcad zs formula)
+  Center: Modern (Hilbert instantaneous frequency)
+  Right:  Overlay (both F1 curves on same axes)
 
 Traces:
   - Black solid: LOESS F1 smoothed curve (span=0.2)
-  - Green solid + diamonds: Si reference (Cfe=0 / Cfe=4.5ppm)
-  - Red solid + diamonds: Si1 reference (Cfe=16ppm / Cfe=20.5ppm)
+  - Green solid + diamonds: Si reference (Cfe=0)
+  - Red solid + diamonds: Si1 reference (Cfe=16ppm)
 
-X axis: dT (C) = tn - T  (honest, from temperature data)
+X axis: dT (C) = tn - T
 Y axis: R (mm/day)
 """
 
@@ -23,8 +28,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from propis_app.core.prn_reader import read_prn
-from propis_app.core.pipeline import CycleParams, run_classic
+from propis_app.core.pipeline import CycleParams, run_classic, run_modern
 from propis_app.core.reference_curves import get_mathcad_references
+from propis_app.core.kinetics.power_law import power_law_model
 
 
 # Output directory
@@ -67,27 +73,7 @@ MCD_PARAMS = [
 
 
 def loess_F1(x_data, y_data, x_grid, span=0.2):
-    """
-    LOESS smoothing + interpolation/extrapolation on arbitrary grid.
-
-    Matches Mathcad:
-      S3 := loess(VX, VY, span)
-      F1(x) := interp(S3, VX, VY, x)
-
-    Parameters
-    ----------
-    x_data, y_data : array
-        Measured data points.
-    x_grid : array
-        Grid of x values where F1 is evaluated (can extend beyond data range).
-    span : float
-        LOESS bandwidth (fraction of data used for each local fit).
-
-    Returns
-    -------
-    y_grid : array
-        Smoothed/extrapolated values at x_grid points. Clamped to >= 0.
-    """
+    """LOESS smoothing + interpolation on arbitrary grid."""
     from scipy.interpolate import interp1d
 
     try:
@@ -109,125 +95,473 @@ def loess_F1(x_data, y_data, x_grid, span=0.2):
         else:
             y_smooth = savgol_filter(y_s, window, polyorder=2)
 
-    # Interpolate/extrapolate to the full grid
-    # (Mathcad interp extrapolates linearly beyond data range)
     f = interp1d(x_smooth, y_smooth, kind='linear',
                  fill_value='extrapolate', bounds_error=False)
     y_grid = f(x_grid)
-    return np.maximum(y_grid, 0.0)
+    return y_grid
 
 
-def plot_mathcad_style(result, output_path):
-    """
-    Create a single R(dT) plot in Mathcad style.
+def get_f1_curve(result, span=0.2):
+    """Extract LOESS F1 curve from a pipeline result. Returns (dT_grid, R_loess) or None."""
+    if result is None or result.dense_rate is None or len(result.dense_rate) < 10:
+        return None
 
-    Matches Base_grath.jpg layout:
-    - Black solid line: LOESS F1 curve
-    - Green solid + diamonds: Si reference
-    - Red solid + diamonds: Si1 reference
-    """
-    if result.dense_rate is None or len(result.dense_rate) < 10:
-        print(f"  SKIP: no dense data")
-        return
-
-    te = result.te
-    tn = result.tn
-    salt = result.Salt
-    acid = result.Acid
-    Td = result.Td
-
-    # Use dense d-step data from Mathcad zs formula (~2000+ points)
-    # Raw rates have arcsin oscillations — LOESS smoothing handles them
-    # Include ALL points with dT > 0 (growth zone + dead zone zeros)
-    # so LOESS naturally produces F1→0 in the dead zone
     dT_dense = result.dense_supercooling
     R_dense = result.dense_rate
 
-    mask = dT_dense > 0
+    # Включаем ВСЕ данные: рост (R>0) + растворение (R<0) + dead zone (R≈0)
+    # Фильтр только по конечности значений
+    mask = np.isfinite(dT_dense) & np.isfinite(R_dense)
     if np.sum(mask) < 10:
-        print(f"  SKIP: too few dense points ({np.sum(mask)})")
-        return
+        return None
 
     dT_data = dT_dense[mask]
     R_data = R_dense[mask]
 
-    # LOESS F1 on dense data (Mathcad: S3=loess(VX,VY,0.2); F1(x)=interp)
-    # Grid from 0 to data max (no extrapolation beyond data range)
-    dT_grid = np.linspace(0, dT_data.max(), 300)
-    R_loess = loess_F1(dT_data, R_data, dT_grid, span=0.2)
-    dT_loess = dT_grid
+    dT_min = dT_data.min()
+    dT_max = dT_data.max()
+    dT_grid = np.linspace(dT_min, dT_max, 300)
+    R_loess = loess_F1(dT_data, R_data, dT_grid, span=span)
+    return dT_grid, R_loess
 
-    # For axis limits, use only positive-rate data
-    pos_mask = R_data > 0
-    dT_growth = dT_data[pos_mask] if np.any(pos_mask) else dT_data
-    R_growth = R_data[pos_mask] if np.any(pos_mask) else R_data
 
-    # Reference curves Si, Si1 with honest dT
-    si_curve, si1_curve = get_mathcad_references(te, tn, salt, acid)
+def plot_single_panel(ax, result, mode_label, si_curve, si1_curve, show_refs=True):
+    """Plot one R(dT) panel on given axes."""
+    f1 = get_f1_curve(result)
+    if f1 is None:
+        ax.text(0.5, 0.5, "NO DATA", transform=ax.transAxes,
+                ha="center", va="center", fontsize=14, color="red")
+        ax.set_title(mode_label, fontsize=10)
+        return
 
-    # --- Plot ---
-    fig, ax = plt.subplots(figsize=(8, 6))
+    dT_loess, R_loess = f1
 
-    # Trace 1: LOESS F1 — black solid (main experimental curve)
+    # F1 curve
     ax.plot(dT_loess, R_loess, color="black", linewidth=2.0, zorder=5,
             label="F1 (LOESS)")
 
-    # Trace 2: Si — green solid + diamonds
-    # Filter valid points (σ% > 0 → dT > 0)
+    # References
+    if show_refs:
+        si_mask = si_curve.supercooling > 0
+        if np.any(si_mask):
+            ax.plot(si_curve.supercooling[si_mask], si_curve.rate_mm_day[si_mask],
+                    color="green", linewidth=1.5, marker="D", markersize=5,
+                    zorder=4, label=si_curve.name)
+
+        si1_mask = si1_curve.supercooling > 0
+        if np.any(si1_mask):
+            ax.plot(si1_curve.supercooling[si1_mask], si1_curve.rate_mm_day[si1_mask],
+                    color="red", linewidth=1.5, marker="D", markersize=5,
+                    zorder=4, label=si1_curve.name)
+
+    ax.set_xlabel("dT (C)", fontsize=10)
+    ax.set_ylabel("R (mm/day)", fontsize=10)
+    ax.grid(True, color="green", alpha=0.3, linewidth=0.5)
+
+    # Parameter box
+    info = (f"s0={result.s0:.3f}\ns1={result.s1:.3f}\n"
+            f"Sigm={result.Sigm:.3f}\nSig035={result.Sig035:.3f}\n"
+            f"s2={result.s2:.3f}\nTd={result.Td:.3f}")
+    if hasattr(result, 's0_d') and result.s0_d > 0:
+        info += f"\ns0_d={result.s0_d:.3f}\ns1_d={result.s1_d:.3f}"
+    ax.text(0.03, 0.97, info, transform=ax.transAxes, fontsize=7,
+            va="top", ha="left", family="monospace",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85))
+
+    ax.set_title(mode_label, fontsize=10, fontweight="bold")
+
+
+def get_f1_curve_from_arrays(dT_dense, R_dense, Td=0.0, span=0.2):
+    """Build LOESS F1 curve from raw dT/R arrays (for method comparison)."""
+    if dT_dense is None or R_dense is None or len(R_dense) < 10:
+        return None
+
+    mask = (dT_dense > 0) & (R_dense > 0.01)
+    if np.sum(mask) < 10:
+        return None
+
+    dT_data = dT_dense[mask]
+    R_data = R_dense[mask]
+
+    # Dead zone anchors
+    if Td > 0:
+        n_anchors = 10
+        dT_anchors = np.linspace(0, Td, n_anchors)
+        R_anchors = np.zeros(n_anchors)
+        dT_data = np.concatenate([dT_anchors, dT_data])
+        R_data = np.concatenate([R_anchors, R_data])
+
+    dT_grid = np.linspace(0, dT_data.max(), 300)
+    R_loess = loess_F1(dT_data, R_data, dT_grid, span=span)
+    R_loess[dT_grid <= Td] = 0.0
+    return dT_grid, R_loess
+
+
+def plot_methods_comparison(result_modern, si_curve, si1_curve, output_path):
+    """3-panel comparison of Modern rate extraction methods:
+    Fixed SG | Adaptive SG | Sliding Regression.
+    + 4th panel: overlay of all 3 + R² from regression.
+    """
+    if result_modern is None or result_modern.dense_rate is None:
+        return
+
+    dT = result_modern.dense_supercooling
+    Td = result_modern.Td if hasattr(result_modern, 'Td') else 0.0
+
+    methods = [
+        ("Fixed SG (baseline)", result_modern.dense_rate, "black"),
+        ("Adaptive SG", result_modern.dense_rate_asg, "blue"),
+        ("Sliding Regression", result_modern.dense_rate_reg, "darkred"),
+    ]
+
+    # Common axis limits
+    all_dT_max = 0
+    all_R_max = 0
+    for label, rate_arr, _ in methods:
+        if rate_arr is not None:
+            f1 = get_f1_curve_from_arrays(dT, rate_arr, Td)
+            if f1 is not None:
+                all_dT_max = max(all_dT_max, f1[0].max())
+                all_R_max = max(all_R_max, f1[1].max())
+
     si_mask = si_curve.supercooling > 0
     if np.any(si_mask):
-        ax.plot(si_curve.supercooling[si_mask], si_curve.rate_mm_day[si_mask],
-                color="green", linewidth=1.5, marker="D", markersize=6,
-                zorder=4, label=si_curve.name)
+        all_dT_max = max(all_dT_max, si_curve.supercooling[si_mask].max())
+        all_R_max = max(all_R_max, si_curve.rate_mm_day[si_mask].max())
 
-    # Trace 3: Si1 — red solid + diamonds
+    x_lim = min(all_dT_max * 1.1, 8.0) if all_dT_max > 0 else 8.0
+    y_lim = min(all_R_max * 1.15, 5.0) if all_R_max > 0 else 5.0
+
+    fig, axes = plt.subplots(1, 4, figsize=(24, 6))
+
+    # Panels 1-3: individual methods
+    for idx, (label, rate_arr, color) in enumerate(methods):
+        ax = axes[idx]
+        if rate_arr is not None:
+            f1 = get_f1_curve_from_arrays(dT, rate_arr, Td)
+            if f1 is not None:
+                ax.plot(f1[0], f1[1], color=color, linewidth=2.0,
+                        zorder=5, label="F1 (LOESS)")
+            else:
+                ax.text(0.5, 0.5, "NO DATA", transform=ax.transAxes,
+                        ha="center", va="center", fontsize=14, color="red")
+        else:
+            ax.text(0.5, 0.5, "N/A", transform=ax.transAxes,
+                    ha="center", va="center", fontsize=14, color="gray")
+
+        # References
+        if np.any(si_mask):
+            ax.plot(si_curve.supercooling[si_mask], si_curve.rate_mm_day[si_mask],
+                    color="green", linewidth=1.0, marker="D", markersize=4,
+                    alpha=0.6, zorder=3, label=si_curve.name)
+        si1_mask = si1_curve.supercooling > 0
+        if np.any(si1_mask):
+            ax.plot(si1_curve.supercooling[si1_mask], si1_curve.rate_mm_day[si1_mask],
+                    color="red", linewidth=1.0, marker="D", markersize=4,
+                    alpha=0.6, zorder=3, label=si1_curve.name)
+
+        ax.set_xlabel("dT (C)", fontsize=10)
+        ax.set_ylabel("R (mm/day)", fontsize=10)
+        ax.grid(True, color="green", alpha=0.3, linewidth=0.5)
+        ax.set_xlim(0, x_lim)
+        ax.set_ylim(0, y_lim)
+        ax.set_title(label, fontsize=10, fontweight="bold")
+        ax.legend(loc="lower right", fontsize=7, framealpha=0.9)
+
+    # Panel 4: Overlay all 3 methods
+    ax = axes[3]
+    for label, rate_arr, color in methods:
+        if rate_arr is not None:
+            f1 = get_f1_curve_from_arrays(dT, rate_arr, Td)
+            if f1 is not None:
+                ls = "--" if label != "Fixed SG (baseline)" else "-"
+                ax.plot(f1[0], f1[1], color=color, linewidth=2.0,
+                        linestyle=ls, label=label, zorder=5)
+
+    # R² на вторичной оси (для regression)
+    if result_modern.dense_rate_reg_r2 is not None:
+        ax2 = ax.twinx()
+        # R² vs dT: усредняем R² по бинам dT
+        r2_arr = result_modern.dense_rate_reg_r2
+        valid = dT > 0
+        if np.any(valid):
+            ax2.scatter(dT[valid], r2_arr[valid], s=1, alpha=0.15,
+                       color="orange", zorder=1)
+            ax2.set_ylabel("R² (regression)", fontsize=8, color="orange")
+            ax2.set_ylim(0, 1.05)
+            ax2.tick_params(axis='y', labelcolor='orange', labelsize=7)
+
+    if np.any(si_mask):
+        ax.plot(si_curve.supercooling[si_mask], si_curve.rate_mm_day[si_mask],
+                color="green", linewidth=1.0, marker="D", markersize=4,
+                alpha=0.4, zorder=3, label=si_curve.name)
+
+    ax.set_xlabel("dT (C)", fontsize=10)
+    ax.set_ylabel("R (mm/day)", fontsize=10)
+    ax.grid(True, color="green", alpha=0.3, linewidth=0.5)
+    ax.set_xlim(0, x_lim)
+    ax.set_ylim(0, y_lim)
+    ax.set_title("Overlay + R²", fontsize=10, fontweight="bold")
+    ax.legend(loc="lower right", fontsize=7, framealpha=0.9)
+
+    short_name = result_modern.filename.replace("__", "").replace(".prn", "")
+    fig.suptitle(f"Methods comparison: {short_name}  (Modern pipeline)",
+                 fontsize=13, fontweight="bold")
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {output_path.name}")
+
+
+def plot_comparison(result_classic, result_modern, output_path):
+    """Create 3-panel comparison: Classic | Modern | Overlay."""
+    te = result_classic.te
+    tn = result_classic.tn
+    salt = result_classic.Salt
+    acid = result_classic.Acid
+
+    si_curve, si1_curve = get_mathcad_references(te, tn, salt, acid)
+
+    # Determine common axis limits
+    all_dT_max = 0
+    all_R_max = 0
+    for res in [result_classic, result_modern]:
+        f1 = get_f1_curve(res)
+        if f1 is not None:
+            all_dT_max = max(all_dT_max, f1[0].max())
+            all_R_max = max(all_R_max, f1[1].max())
+
+    si_mask = si_curve.supercooling > 0
+    if np.any(si_mask):
+        all_dT_max = max(all_dT_max, si_curve.supercooling[si_mask].max())
+        all_R_max = max(all_R_max, si_curve.rate_mm_day[si_mask].max())
+
+    x_lim = min(all_dT_max * 1.1, 8.0)
+    y_lim = min(all_R_max * 1.15, 5.0)
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+
+    # Panel 1: Classic
+    plot_single_panel(axes[0], result_classic, "Classic (zs formula)", si_curve, si1_curve)
+    axes[0].set_xlim(0, x_lim)
+    axes[0].set_ylim(0, y_lim)
+    axes[0].legend(loc="lower right", fontsize=7, framealpha=0.9)
+
+    # Panel 2: Modern
+    plot_single_panel(axes[1], result_modern, "Modern (Hilbert)", si_curve, si1_curve)
+    axes[1].set_xlim(0, x_lim)
+    axes[1].set_ylim(0, y_lim)
+    axes[1].legend(loc="lower right", fontsize=7, framealpha=0.9)
+
+    # Panel 3: Overlay
+    f1_c = get_f1_curve(result_classic)
+    f1_m = get_f1_curve(result_modern)
+
+    if f1_c is not None:
+        axes[2].plot(f1_c[0], f1_c[1], color="black", linewidth=2.0,
+                     label="Classic", zorder=5)
+    if f1_m is not None:
+        axes[2].plot(f1_m[0], f1_m[1], color="blue", linewidth=2.0,
+                     linestyle="--", label="Modern", zorder=5)
+
+    # References on overlay
+    if np.any(si_mask):
+        axes[2].plot(si_curve.supercooling[si_mask], si_curve.rate_mm_day[si_mask],
+                     color="green", linewidth=1.0, marker="D", markersize=4,
+                     alpha=0.6, zorder=3, label=si_curve.name)
+    si1_mask = si1_curve.supercooling > 0
+    if np.any(si1_mask):
+        axes[2].plot(si1_curve.supercooling[si1_mask], si1_curve.rate_mm_day[si1_mask],
+                     color="red", linewidth=1.0, marker="D", markersize=4,
+                     alpha=0.6, zorder=3, label=si1_curve.name)
+
+    axes[2].set_xlabel("dT (C)", fontsize=10)
+    axes[2].set_ylabel("R (mm/day)", fontsize=10)
+    axes[2].grid(True, color="green", alpha=0.3, linewidth=0.5)
+    axes[2].set_xlim(0, x_lim)
+    axes[2].set_ylim(0, y_lim)
+    axes[2].set_title("Overlay", fontsize=10, fontweight="bold")
+    axes[2].legend(loc="lower right", fontsize=7, framealpha=0.9)
+
+    short_name = result_classic.filename.replace("__", "").replace(".prn", "")
+    fig.suptitle(f"{short_name}   te={te:.2f}  tn={tn:.2f}  Td={result_classic.Td:.2f}",
+                 fontsize=13, fontweight="bold")
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {output_path.name}")
+
+
+def plot_simple_overlay(result_classic, result_modern, ax, title=""):
+    """Один простой график: Classic vs Modern vs эталоны на одних осях."""
+    te = result_classic.te
+    tn = result_classic.tn
+    si_curve, si1_curve = get_mathcad_references(te, tn, result_classic.Salt, result_classic.Acid)
+
+    f1_c = get_f1_curve(result_classic)
+    f1_m = get_f1_curve(result_modern)
+
+    all_dT_max = 0
+    all_R_max = 0
+    if f1_c is not None:
+        all_dT_max = max(all_dT_max, f1_c[0].max())
+        all_R_max = max(all_R_max, f1_c[1].max())
+    if f1_m is not None:
+        all_dT_max = max(all_dT_max, f1_m[0].max())
+        all_R_max = max(all_R_max, f1_m[1].max())
+
+    si_mask = si_curve.supercooling > 0
+    if np.any(si_mask):
+        all_dT_max = max(all_dT_max, si_curve.supercooling[si_mask].max())
+        all_R_max = max(all_R_max, si_curve.rate_mm_day[si_mask].max())
+
+    # Эталоны
+    if np.any(si_mask):
+        ax.plot(si_curve.supercooling[si_mask], si_curve.rate_mm_day[si_mask],
+                color="green", linewidth=1.5, marker="D", markersize=5,
+                alpha=0.7, zorder=3, label="Si (Cfe=0)")
     si1_mask = si1_curve.supercooling > 0
     if np.any(si1_mask):
         ax.plot(si1_curve.supercooling[si1_mask], si1_curve.rate_mm_day[si1_mask],
-                color="red", linewidth=1.5, marker="D", markersize=6,
-                zorder=4, label=si1_curve.name)
+                color="red", linewidth=1.5, marker="D", markersize=5,
+                alpha=0.7, zorder=3, label="Si1 (Cfe=16ppm)")
 
-    # Axis labels (Mathcad style)
-    ax.set_xlabel("dT (C)", fontsize=13)
-    ax.set_ylabel("R (mm/day)", fontsize=13)
+    # Classic
+    if f1_c is not None:
+        ax.plot(f1_c[0], f1_c[1], color="black", linewidth=2.5,
+                zorder=5, label="Classic")
 
-    # Axis limits
-    x_max_data = dT_growth.max() * 1.1
-    y_max_data = R_growth.max() * 1.15
-    x_max = max(
-        x_max_data,
-        si_curve.supercooling.max() * 1.05 if np.any(si_mask) else 4.0,
-    )
-    y_max = max(
-        y_max_data,
-        si_curve.rate_mm_day.max() * 1.1 if np.any(si_mask) else 3.0,
-    )
-    ax.set_xlim(0, min(x_max, 8.0))
-    ax.set_ylim(0, min(y_max, 5.0))
+    # Modern (Hilbert dual-ch)
+    if f1_m is not None:
+        ax.plot(f1_m[0], f1_m[1], color="blue", linewidth=2.0,
+                linestyle="--", zorder=5, label="Hilbert")
 
-    # Grid (like Mathcad green grid)
-    ax.grid(True, color="green", alpha=0.3, linewidth=0.5)
+    # PLL
+    Td_val = result_modern.Td if hasattr(result_modern, 'Td') else 0.0
+    if result_modern.dense_rate_pll is not None:
+        dT_m = result_modern.dense_supercooling
+        f1_pll = get_f1_curve_from_arrays(dT_m, result_modern.dense_rate_pll, Td_val)
+        if f1_pll is not None:
+            ax.plot(f1_pll[0], f1_pll[1], color="purple", linewidth=2.0,
+                    linestyle="-.", zorder=5, label="PLL")
 
-    # Title with parameters
-    short_name = result.filename.replace("__", "").replace(".prn", "")
-    title = f"{short_name}  te={te:.2f}  tn={tn:.2f}  Td={result.Td:.2f}"
+    # CWT Ridge
+    if result_modern.dense_rate_cwt is not None:
+        f1_cwt = get_f1_curve_from_arrays(dT_m, result_modern.dense_rate_cwt, Td_val)
+        if f1_cwt is not None:
+            ax.plot(f1_cwt[0], f1_cwt[1], color="orange", linewidth=2.0,
+                    linestyle=":", zorder=5, label="CWT")
+
+    # STFT
+    if hasattr(result_modern, 'dense_rate_stft') and result_modern.dense_rate_stft is not None:
+        f1_stft = get_f1_curve_from_arrays(dT_m, result_modern.dense_rate_stft, Td_val)
+        if f1_stft is not None:
+            ax.plot(f1_stft[0], f1_stft[1], color="cyan", linewidth=2.5,
+                    linestyle="-", zorder=6, label="STFT")
+
+    x_lim = min(all_dT_max * 1.1, 8.0) if all_dT_max > 0 else 5.0
+    y_lim = min(all_R_max * 1.15, 5.0) if all_R_max > 0 else 3.0
+    ax.set_xlim(0, x_lim)
+    ax.set_ylim(0, y_lim)
+    ax.set_xlabel("dT (°C)")
+    ax.set_ylabel("R (mm/day)")
+    ax.grid(True, color="gray", alpha=0.3)
+    ax.legend(loc="upper left", fontsize=8, framealpha=0.9)
     ax.set_title(title, fontsize=11, fontweight="bold")
 
-    # Parameter box (s0, s1, Sigm, Sig035, s2)
-    info_text = (
-        f"s0={result.s0:.3f}\n"
-        f"s1={result.s1:.3f}\n"
-        f"Sigm={result.Sigm:.3f}\n"
-        f"Sig035={result.Sig035:.3f}\n"
-        f"s2={result.s2:.3f}\n"
-        f"Td={result.Td:.3f}"
-    )
-    ax.text(0.03, 0.97, info_text, transform=ax.transAxes,
-            fontsize=9, va="top", ha="left", family="monospace",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85))
 
-    ax.legend(loc="lower right", fontsize=9, framealpha=0.9)
+def plot_pair(result_classic, result_modern, output_path, short_name):
+    """Два графика рядом: Classic | Modern. Чистое сравнение."""
+    te = result_classic.te
+    tn = result_classic.tn
+    si_curve, si1_curve = get_mathcad_references(te, tn, result_classic.Salt, result_classic.Acid)
 
+    f1_c = get_f1_curve(result_classic)
+    f1_m = get_f1_curve(result_modern)
+
+    # Общие оси (включая отрицательные dT и R)
+    all_dT_max, all_R_max = 0, 0
+    all_dT_min, all_R_min = 0, 0
+    for f1 in [f1_c, f1_m]:
+        if f1 is not None:
+            all_dT_max = max(all_dT_max, f1[0].max())
+            all_dT_min = min(all_dT_min, f1[0].min())
+            all_R_max = max(all_R_max, f1[1].max())
+            all_R_min = min(all_R_min, f1[1].min())
+    si_mask = si_curve.supercooling > 0
+    if np.any(si_mask):
+        all_dT_max = max(all_dT_max, si_curve.supercooling[si_mask].max())
+        all_R_max = max(all_R_max, si_curve.rate_mm_day[si_mask].max())
+    x_lim = min(all_dT_max * 1.1, 8.0) if all_dT_max > 0 else 5.0
+    y_lim = min(all_R_max * 1.15, 5.0) if all_R_max > 0 else 3.0
+    dT_min = all_dT_min * 1.1 if all_dT_min < 0 else -0.5
+    y_min = min(all_R_min * 1.15, -1.0) if all_R_min < 0 else -0.3
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
+
+    for ax, f1, res, title, color in [(ax1, f1_c, result_classic, "Classic", "black"),
+                                       (ax2, f1_m, result_modern, "Modern (Hilbert)", "blue")]:
+        # Эталоны
+        if np.any(si_mask):
+            ax.plot(si_curve.supercooling[si_mask], si_curve.rate_mm_day[si_mask],
+                    color="green", linewidth=1.5, marker="D", markersize=5,
+                    alpha=0.7, zorder=3, label="Si (Cfe=0)")
+        si1_mask = si1_curve.supercooling > 0
+        if np.any(si1_mask):
+            ax.plot(si1_curve.supercooling[si1_mask], si1_curve.rate_mm_day[si1_mask],
+                    color="red", linewidth=1.5, marker="D", markersize=5,
+                    alpha=0.7, zorder=3, label="Si1 (Cfe=16ppm)")
+        # LOESS кривая
+        if f1 is not None:
+            ax.plot(f1[0], f1[1], color=color, linewidth=2.5, zorder=5, label="R(dT)")
+
+        # Фитированная кривая роста: R = s0 * (sigma - s1)^w
+        if res.s0 > 0 and res.fit_result is not None:
+            from propis_app.core.solubility import supersaturation_percent, supercooling as sc_func
+            sol = __import__('propis_app.core.solubility', fromlist=['get_solubility_set']).get_solubility_set(res.Salt, res.Acid)
+            dT_fit = np.linspace(0, x_lim, 300)
+            T_fit = res.tn - dT_fit
+            sigma_fit = supersaturation_percent(T_fit, res.tn, sol)
+            R_fit = power_law_model(sigma_fit, res.s0, res.s1, 1.0)
+            ax.plot(dT_fit, R_fit, color="magenta", linewidth=1.5, linestyle="--",
+                    zorder=6, label=f"fit s0={res.s0:.2f}")
+
+        # Фитированная кривая растворения: R = -s0_d * (|sigma| - s1_d)^w
+        if hasattr(res, 's0_d') and res.s0_d > 0:
+            from propis_app.core.solubility import supersaturation_percent
+            sol = __import__('propis_app.core.solubility', fromlist=['get_solubility_set']).get_solubility_set(res.Salt, res.Acid)
+            dT_diss = np.linspace(dT_min, 0, 200)
+            T_diss = res.tn - dT_diss
+            sigma_diss = supersaturation_percent(T_diss, res.tn, sol)
+            # sigma_diss < 0 in dissolution region
+            R_diss = -power_law_model(np.abs(sigma_diss), res.s0_d, res.s1_d, 1.0)
+            ax.plot(dT_diss, R_diss, color="orange", linewidth=1.5, linestyle="--",
+                    zorder=6, label=f"diss s0_d={res.s0_d:.2f}")
+
+        # Info box
+        info = (f"s0={res.s0:.3f}  s1={res.s1:.3f}\n"
+                f"Td={res.Td:.2f}  Sigm={res.Sigm:.3f}")
+        if hasattr(res, 's0_d') and res.s0_d > 0:
+            info += f"\ns0_d={res.s0_d:.3f}  s1_d={res.s1_d:.3f}"
+        ax.text(0.03, 0.97, info, transform=ax.transAxes, fontsize=7,
+                va="top", ha="left", family="monospace",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85))
+
+        ax.set_xlim(dT_min, x_lim)
+        ax.set_ylim(y_min, y_lim)
+        ax.axhline(y=0, color="gray", linewidth=0.8, linestyle="-")
+        ax.axvline(x=0, color="gray", linewidth=0.8, linestyle="-")
+        ax.set_xlabel("dT (°C)", fontsize=12)
+        ax.grid(True, color="gray", alpha=0.2)
+        ax.legend(loc="upper left", fontsize=8)
+        ax.set_title(title, fontsize=13, fontweight="bold")
+
+    ax1.set_ylabel("R (mm/day)", fontsize=12)
+
+    fig.suptitle(f"{short_name}   te={te:.2f}  tn={tn:.2f}  Td={result_classic.Td:.2f}",
+                 fontsize=14, fontweight="bold")
     fig.tight_layout()
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -238,35 +572,33 @@ def main():
     base = project_root
     plt.rcParams["font.size"] = 11
 
+    # 3 представительных случая: типичный, проблемный, другой файл
+    SELECTED = [
+        MCD_PARAMS[0],   # 020326_2_1 — типичный
+        MCD_PARAMS[9],   # 030326_6_3 — ранее проблемный
+        MCD_PARAMS[10],  # 040326_2_2 — другой день
+    ]
+
     print(f"Output: {OUTPUT_DIR}\n")
 
-    for prn_rel, mcd_name, n1, n2, im, isat, im1, isat1, tn in MCD_PARAMS:
+    for prn_rel, mcd_name, n1, n2, im, isat, im1, isat1, tn in SELECTED:
         prn_path = base / prn_rel
         if not prn_path.exists():
             print(f"SKIP: {prn_path}")
             continue
 
-        try:
-            prn = read_prn(prn_path)
-        except Exception as e:
-            print(f"ERROR reading {prn_path}: {e}")
-            continue
-
+        prn = read_prn(prn_path)
         params = CycleParams(n1=n1, n2=n2, im=im, isat=isat, im1=im1, isat1=isat1)
         short = mcd_name.replace("__", "")
         print(f"Processing {short}...")
 
-        try:
-            result = run_classic(
-                prn, params, salt=1, acid=0, face=0,
-                channel=1, tn_manual=tn,
-            )
-        except Exception as e:
-            print(f"  Classic ERROR: {e}")
-            continue
+        result_classic = run_classic(prn, params, salt=1, acid=0, face=0,
+                                      channel=1, tn_manual=tn)
+        result_modern = run_modern(prn, params, salt=1, acid=0, face=0,
+                                    channel=1, tn_manual=tn)
 
-        out_file = OUTPUT_DIR / f"R_dT_{short}.png"
-        plot_mathcad_style(result, out_file)
+        out_file = OUTPUT_DIR / f"{short}.png"
+        plot_pair(result_classic, result_modern, out_file, short)
 
     print(f"\nDone! Output: {OUTPUT_DIR}")
 
