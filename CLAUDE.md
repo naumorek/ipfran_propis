@@ -36,3 +36,9 @@
 - `docs/research_amplitude_normalization.md` — **Нормализация амплитуды**: peak-trough envelope, связь амплитуды и фазы, почему Hilbert шумит в dead zone, Вариант D (peak-trough + Hilbert)
 - `docs/research_tn_key_methods.md` — **Научный обзор ключевых методов**: определение критических параметров фазовых переходов из косвенных измерений — 5 глав (распространение ошибки, dead zone / CV-модель, выбор кинетической модели BCF/power law/B+S, Simulation-Based Inference, символьная регрессия PySR/SINDy/KAN) + интеграция + краткие обзоры NLME/bootstrap/GP/PINN/conformal prediction/changepoint detection/Neural ODE + дорожная карта
 - `docs/experiment_log.md` — **Журнал экспериментов**: итерации по улучшению Modern pipeline, идеи, валидация, результаты
+
+## Исследования: мониторинг кристаллизатора (Этап bridge стенд → промышленность)
+
+- `docs/crystallizer_research/research_crystallizer_monitoring.md` — **Обзор промышленной инструментации**: проводимость (Belruss/LLNL), рефрактометрия, ATR-FTIR, УЗ, pH-зонды, камера машинного зрения, Pt100 массивы, PIV, CFD; что используют LLNL/SIOM/CEA; план оснащения в 3 фазы (5–50k EUR)
+- `docs/crystallizer_research/research_crystallizer_diy.md` — **DIY инструментация** (330–560 EUR, 2 недели): самодельная кондуктометрия (электроды + AC + ADS1115), MAX31865 + Pt100, Raspberry Pi камера + OpenCV, pH модуль, ESP32 сбор данных, shadowgraph; схемы, код, калибровка
+- `docs/crystallizer_research/research_diy_accuracy.md` — **Анализ точности DIY**: полное распространение ошибок κ→C→σ→R(σ); бутылочное горлышко — дрейф электродов (не АЦП); DIY разрешает σ>5% (рабочая зона), НЕ разрешает мёртвую зону (σ_dead≈0.3%); влияние градиента T (2.5–3 м банка), качания питателя (7 с), пограничного слоя
