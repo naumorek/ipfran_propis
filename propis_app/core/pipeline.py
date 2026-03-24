@@ -86,6 +86,8 @@ class PipelineResult:
     growth_rate: Optional[GrowthRateData] = None
     fit_result: Optional[PowerLawResult] = None
     bcf_result: Optional[object] = None  # BCFResult from modern pipeline
+    bcf_result_fixed: Optional[object] = None  # BCFResult with σ_dead fixed from df/dt
+    bcf_result_T: Optional[object] = None  # BCFResultT (T-dependent)
     diss_fit_result: Optional[PowerLawResult] = None  # Dissolution fit
 
     # Dense d-step data (from build_phase_dstep, ~2000+ points including dead zone)
@@ -993,8 +995,10 @@ def run_modern(prn: PrnData, params: CycleParams,
     except Exception:
         pass  # keep grid search result
 
-    from .kinetics.bcf_model import fit_bcf
-    bcf_fit = fit_bcf(sigma_growth, rate_growth)
+    from .kinetics.bcf_model import fit_bcf, fit_bcf_fixed_sigma_d, fit_bcf_T
+    bcf_fit = fit_bcf(sigma_growth, rate_growth, auto_weight=True)
+    bcf_fit_fixed = None
+    bcf_fit_T = None
 
     # Step 7b (MODERN): Dissolution fit — mirror of growth power law
 
@@ -1038,6 +1042,20 @@ def run_modern(prn: PrnData, params: CycleParams,
     else:
         Sigm = float(supersaturation_percent(t_im, tn, sol))
 
+    # Task 4.4: fixed σ_dead from df/dt (if dead zone detected)
+    if Sigm > 0.1:
+        bcf_fit_fixed = fit_bcf_fixed_sigma_d(
+            sigma_growth, rate_growth, sigma_d_fixed=Sigm, auto_weight=True)
+
+    # Task 2: T-dependent CV (only if σ_dead resolved)
+    if len(rate_temps) == len(rates):
+        growth_mask_T = np.isfinite(sigma) & np.isfinite(rates) & (rates > 0)
+        growth_temps = rate_temps[growth_mask_T]
+        if len(growth_temps) == len(sigma_growth):
+            bcf_fit_T = fit_bcf_T(
+                sigma_growth, rate_growth, growth_temps,
+                bcf_3param=bcf_fit, auto_weight=True)
+
     # Dense data for F1 LOESS plotting (Hilbert-based rates at d-step spacing)
     dense_sigma_arr = supersaturation_percent(rate_temps, tn, sol)
     dense_supercooling_arr = supercooling(rate_temps, tn)
@@ -1056,6 +1074,8 @@ def run_modern(prn: PrnData, params: CycleParams,
         fit_result=fit,
         diss_fit_result=diss_fit,
         bcf_result=bcf_fit,
+        bcf_result_fixed=bcf_fit_fixed,
+        bcf_result_T=bcf_fit_T,
         dense_rate=rates,
         dense_temperature=rate_temps,
         dense_sigma=dense_sigma_arr,
